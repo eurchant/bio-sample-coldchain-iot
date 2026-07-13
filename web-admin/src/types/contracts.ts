@@ -1,0 +1,96 @@
+export type TaskStatus =
+  | 'pending_pack'
+  | 'pending_handoff'
+  | 'in_transit'
+  | 'arrived'
+  | 'signed'
+  | 'rejected'
+  | 'canceled'
+
+export type BoxStatus = 'BOX_OPEN' | 'BOX_CLOSED'
+export type MoveStatus = 'STABLE' | 'MILD' | 'SEVERE' | 'IMPACT' | 'FREE_FALL'
+export type TemperatureStatus = 'TEMP_OK' | 'TEMP_ALERT'
+
+export interface ApiEnvelope<T> {
+  code: number
+  message: string
+  data: T
+}
+
+export interface Task {
+  task_id: string
+  device_id: string | null
+  sample_name: string
+  sender: string
+  receiver: string
+  carrier: string
+  status: TaskStatus
+  started_at: string | null
+  signed_at: string | null
+  rejected_at: string | null
+  rejection_reason: string | null
+  updated_at: string
+}
+
+export interface Telemetry {
+  id: number
+  device_id: string
+  task_id: string
+  temperature: number
+  humidity: number
+  light_raw: number
+  box_status: BoxStatus
+  move_status: MoveStatus
+  temp_status: TemperatureStatus
+  acc_total: number
+  motion_score: number
+  event_type: string
+  timestamp: string
+  created_at: string
+}
+
+export interface Alarm {
+  id: number
+  data_id: number | null
+  task_id: string
+  device_id: string
+  event_type: string
+  event_name: string
+  event_detail: string
+  timestamp: string
+  created_at: string
+}
+
+export interface TelemetryHistory {
+  limit: number
+  items: Telemetry[]
+}
+
+export interface AlarmList {
+  limit: number
+  items: Alarm[]
+}
+
+export interface TraceSummary {
+  total_records: number
+  min_temperature: number | null
+  max_temperature: number | null
+  avg_temperature: number | null
+  min_humidity: number | null
+  max_humidity: number | null
+  event_count: number
+}
+
+export interface HandoffNode {
+  type: 'started' | 'signed' | 'rejected'
+  timestamp: string
+  reason?: string | null
+}
+
+export interface TraceReport {
+  task: Task
+  latest: Telemetry | null
+  summary: TraceSummary
+  events: Alarm[]
+  handoff_nodes: HandoffNode[]
+}
