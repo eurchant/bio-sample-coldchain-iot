@@ -1,0 +1,33 @@
+{
+  "name": "bio-sample-coldchain-miniprogram",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev:mp-weixin": "uni -p mp-weixin",
+    "build:mp-weixin": "uni build -p mp-weixin",
+    "type-check": "vue-tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dcloudio/uni-app": "3.0.0-alpha-5020120260710001",
+    "@dcloudio/uni-components": "3.0.0-alpha-5020120260710001",
+    "@dcloudio/uni-mp-weixin": "3.0.0-alpha-5020120260710001",
+    "pinia": "2.1.7",
+    "vue": "3.4.21"
+  },
+  "devDependencies": {
+    "@dcloudio/types": "3.4.31",
+    "@dcloudio/vite-plugin-uni": "3.0.0-alpha-5020120260710001",
+    "@types/node": "^20.12.7",
+    "sass": "^1.77.8",
+    "typescript": "^5.4.5",
+    "vite": "5.2.8",
+    "vitest": "^1.6.0",
+    "vue-tsc": "^2.0.29"
+  },
+  "overrides": {
+    "rollup": "4.21.0",
+    "nanoid": "3.3.7",
+    "@vue/server-renderer": "3.4.21"
+  }
+}

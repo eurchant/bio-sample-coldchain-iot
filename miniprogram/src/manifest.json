@@ -1,0 +1,12 @@
+{
+  "name": "生物样本冷链转运",
+  "appid": "__UNI__COLDCHAIN",
+  "description": "生物样本冷链转运交接与可信追溯系统",
+  "versionName": "0.1.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "mp-weixin": {
+    "appid": "",
+    "setting": { "urlCheck": false, "es6": true, "minified": true }
+  }
+}

@@ -1,0 +1,14 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+import { onLoad, onPullDownRefresh } from '@dcloudio/uni-app'
+import StatusTag from '@/components/StatusTag.vue'; import StatePanel from '@/components/StatePanel.vue'
+import { taskService } from '@/services/tasks'; import { errorMessage } from '@/services/request'
+import type { Task, Telemetry } from '@/types/api'; import { canStartTask, formatTime } from '@/utils/status'
+const taskId=ref(''); const task=ref<Task|null>(null); const telemetry=ref<Telemetry|null>(null); const loading=ref(true); const error=ref('')
+const canStart=computed(()=>task.value ? canStartTask(task.value.status) : false)
+async function load(){loading.value=true;error.value='';try{[task.value,telemetry.value]=await Promise.all([taskService.getTask(taskId.value),taskService.getLatestTelemetry(taskId.value)])}catch(e){error.value=errorMessage(e)}finally{loading.value=false;uni.stopPullDownRefresh()}}
+function handoff(){uni.navigateTo({url:`/pages/handoff/index?task_id=${encodeURIComponent(taskId.value)}`})}
+onLoad((query)=>{taskId.value=String(query?.task_id||'');if(!taskId.value){error.value='缺少 task_id';loading.value=false;return}load()});onPullDownRefresh(load)
+</script>
+<template><view class="page"><StatePanel v-if="loading" state="loading"/><StatePanel v-else-if="error" state="error" :message="error" @retry="load"/><template v-else-if="task"><view class="card"><view class="row"><view class="title small">{{ task.task_id }}</view><StatusTag :status="task.status"/></view><view class="field row"><text class="label">样本</text><text>{{ task.sample_name }}</text></view><view class="field row"><text class="label">绑定设备</text><text>{{ task.device_id }}</text></view><view class="field row"><text class="label">发出单位</text><text>{{ task.sender }}</text></view><view class="field row"><text class="label">接收单位</text><text>{{ task.receiver }}</text></view><view class="field row"><text class="label">承运人员</text><text>{{ task.carrier }}</text></view><view class="field row"><text class="label">发出时间</text><text>{{ formatTime(task.started_at) }}</text></view></view><view class="card"><view class="section-title">初始监测数据</view><template v-if="telemetry"><view class="metrics"><view><text class="metric">{{ telemetry.temperature }}℃</text><text class="muted">温度</text></view><view><text class="metric">{{ telemetry.humidity }}%</text><text class="muted">湿度</text></view></view><view class="muted">箱体 {{ telemetry.box_status }} · 运动 {{ telemetry.move_status }}</view></template><view v-else class="muted">暂无监测数据</view></view><button v-if="canStart" class="primary" @tap="handoff">发出交接</button></template></view></template>
+<style scoped>.small{font-size:34rpx;margin:0}.section-title{font-size:32rpx;font-weight:700;margin-bottom:24rpx}.metrics{display:grid;grid-template-columns:1fr 1fr;margin-bottom:24rpx}.metrics>view{display:flex;flex-direction:column}.metric{font-size:46rpx;font-weight:700;color:#087f6d}</style>
