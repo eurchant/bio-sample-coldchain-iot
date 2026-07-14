@@ -1,0 +1,24 @@
+{
+  "pages": [
+    {
+      "path": "pages/monitor/index",
+      "style": {
+        "navigationBarTitleText": "运输监控",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/handoff/index",
+      "style": {
+        "navigationBarTitleText": "交接追溯"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "冷链转运",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarBorderColor": "#e3e8ee",
+    "backgroundColor": "#f6f9fc"
+  }
+}

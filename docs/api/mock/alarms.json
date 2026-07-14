@@ -1,0 +1,20 @@
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "limit": 100,
+    "items": [
+      {
+        "id": 1,
+        "data_id": 2,
+        "task_id": "TASK-001",
+        "device_id": "CLD-001",
+        "event_type": "TEMP_ALERT",
+        "event_name": "温度异常",
+        "event_detail": "温度超出当前演示阈值",
+        "timestamp": "2026-07-13T10:05:00+08:00",
+        "created_at": "2026-07-13T10:05:00+08:00"
+      }
+    ]
+  }
+}
