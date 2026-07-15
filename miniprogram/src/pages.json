@@ -6,9 +6,9 @@
     { "path": "pages/handoff/index", "style": { "navigationBarTitleText": "发出交接" } }
   ],
   "globalStyle": {
-    "navigationBarTextStyle": "white",
+    "navigationBarTextStyle": "black",
     "navigationBarTitleText": "冷链转运",
-    "navigationBarBackgroundColor": "#087f6d",
-    "backgroundColor": "#f4f7f8"
+    "navigationBarBackgroundColor": "#ffffff",
+    "backgroundColor": "#f4f7fb"
   }
 }
