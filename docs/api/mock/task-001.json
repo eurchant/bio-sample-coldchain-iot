@@ -1,0 +1,18 @@
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "task_id": "TASK-001",
+    "device_id": "CLD-001",
+    "sample_name": "生物样本转运箱 A",
+    "sender": "高校实验室",
+    "receiver": "医院检验科",
+    "carrier": "演示人员",
+    "status": "in_transit",
+    "started_at": "2026-07-13T10:00:00+08:00",
+    "signed_at": null,
+    "rejected_at": null,
+    "rejection_reason": null,
+    "updated_at": "2026-07-13T10:00:00+08:00"
+  }
+}
