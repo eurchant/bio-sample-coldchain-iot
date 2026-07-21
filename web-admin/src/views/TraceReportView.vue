@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import { formatTime, formatValue, statusTone, taskLabel, temperatureLabel } from '../lib/format'
+import { printTraceReport } from '../lib/reportExport'
 import { useTaskStore } from '../stores/task'
 
 const route = useRoute()
 const store = useTaskStore()
 const report = computed(() => store.trace)
 const routeTaskId = computed(() => String(route.params.taskId || ''))
+const canExportPdf = computed(() => Boolean(report.value))
 
 const handoffLabel: Record<string, string> = {
   started: '发出交接',
@@ -19,8 +22,13 @@ onMounted(() => {
   void store.loadTrace()
 })
 
-function printReport() {
-  window.print()
+function exportPdf() {
+  if (!report.value) return
+  printTraceReport(report.value.task.task_id, report.value.task.updated_at)
+}
+
+function retryLoad() {
+  void store.loadTrace()
 }
 </script>
 
@@ -36,14 +44,21 @@ function printReport() {
         <button class="ghost-button" type="button" @click="store.loadTrace()" :disabled="store.traceLoading">
           {{ store.traceLoading ? '生成中…' : '刷新报告' }}
         </button>
-        <button class="print-button" type="button" @click="printReport">打印视图</button>
+        <div class="pdf-export-control">
+          <button class="print-button" type="button" :disabled="!canExportPdf" @click="exportPdf">
+            打印 / 保存 PDF
+          </button>
+          <small>在系统打印窗口中选择“另存为 PDF”</small>
+        </div>
       </div>
     </div>
 
-    <div v-if="store.traceLoading && !report" class="state-panel">
-      <span class="loader"></span>
-      正在汇总追溯报告…
-    </div>
+    <AsyncStatePanel
+      v-if="store.traceLoading && !report"
+      state="loading"
+      title="正在汇总追溯报告"
+      description="报告内容只使用当前后端追溯接口返回的任务、交接与异常数据。"
+    />
 
     <article v-else-if="report" class="trace-document">
       <header class="report-header">
@@ -145,6 +160,12 @@ function printReport() {
       </footer>
     </article>
 
-    <div v-else class="state-panel is-error">报告暂不可用，请检查 API 或 Mock 数据后重试。</div>
+    <AsyncStatePanel
+      v-else
+      :state="store.monitoringError ? 'offline' : 'error'"
+      title="报告暂不可用"
+      description="请检查 API 或 Mock 数据后重新加载；页面不会用静态内容替代报告。"
+      @retry="retryLoad"
+    />
   </section>
 </template>

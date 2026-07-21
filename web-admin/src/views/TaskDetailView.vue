@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import {
   boxLabel,
   formatTime,
@@ -75,6 +76,10 @@ async function submitAction() {
   if (!pendingAction.value) return
   await store.performAction(pendingAction.value, reason.value)
   if (!store.error) closeAction()
+}
+
+function retryLoad() {
+  void store.bootstrap()
 }
 </script>
 
@@ -177,17 +182,17 @@ async function submitAction() {
           </div>
           <p class="handoff-lead">界面只发起操作请求，不在前端推断状态流转。</p>
           <div class="action-stack">
-            <button class="primary-action" type="button" :disabled="!canStart || store.actionLoading !== null" @click="openAction('start')">
+            <button data-testid="start-task" class="primary-action" type="button" :disabled="!canStart || store.actionLoading !== null" @click="openAction('start')">
               <span>01</span>
               <b>{{ store.actionLoading === 'start' ? '正在发出…' : '发出交接' }}</b>
               <small>进入运输中</small>
             </button>
-            <button class="secondary-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('sign')">
+            <button data-testid="sign-task" class="secondary-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('sign')">
               <span>02</span>
               <b>{{ store.actionLoading === 'sign' ? '正在签收…' : '到达签收' }}</b>
               <small>完成交接</small>
             </button>
-            <button class="danger-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('reject')">
+            <button data-testid="reject-task" class="danger-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('reject')">
               <span>03</span>
               <b>{{ store.actionLoading === 'reject' ? '正在提交…' : '拒收并记录原因' }}</b>
               <small>保留追溯证据</small>
@@ -263,7 +268,13 @@ async function submitAction() {
       </article>
     </template>
 
-    <div v-else class="state-panel is-error">没有读取到任务详情，请刷新后重试。</div>
+    <AsyncStatePanel
+      v-else
+      :state="store.monitoringError ? 'offline' : 'error'"
+      title="没有读取到任务详情"
+      description="请检查数据源配置和网络连接后重新同步。"
+      @retry="retryLoad"
+    />
 
     <div v-if="pendingAction" class="modal-backdrop" role="presentation" @click.self="closeAction">
       <section class="action-modal" role="dialog" aria-modal="true" :aria-label="actionCopy[pendingAction].title">
