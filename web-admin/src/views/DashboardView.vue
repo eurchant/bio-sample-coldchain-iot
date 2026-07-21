@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import { buildDashboardMetrics, buildTrendPath } from '../lib/metrics'
+import AsyncStatePanel from '../components/AsyncStatePanel.vue'
+import { buildDashboardMetrics } from '../lib/metrics'
 import {
   boxLabel,
   formatTime,
@@ -14,11 +15,10 @@ import {
 import { runtimeConfig } from '../services/config'
 import { useTaskStore } from '../stores/task'
 
-const CHART_WIDTH = 720
-const CHART_HEIGHT = 224
-const CHART_PADDING = 18
-
 const store = useTaskStore()
+const TelemetryTrendChart = defineAsyncComponent(
+  () => import('../components/TelemetryTrendChart.vue'),
+)
 const dashboardRoot = ref<HTMLElement | null>(null)
 const isFullscreen = ref(false)
 const fullscreenError = ref<string | null>(null)
@@ -26,30 +26,11 @@ const fullscreenError = ref<string | null>(null)
 const task = computed(() => store.task)
 const telemetry = computed(() => store.telemetry)
 const metrics = computed(() => buildDashboardMetrics(store.history, telemetry.value, store.alarms))
-const temperaturePath = computed(() =>
-  buildTrendPath(metrics.value.trend, 'temperature', {
-    width: CHART_WIDTH,
-    height: CHART_HEIGHT,
-    padding: CHART_PADDING,
-  }),
-)
-const humidityPath = computed(() =>
-  buildTrendPath(metrics.value.trend, 'humidity', {
-    width: CHART_WIDTH,
-    height: CHART_HEIGHT,
-    padding: CHART_PADDING,
-  }),
-)
 const handoffNodes = computed(() => store.trace?.handoff_nodes ?? [])
 const sourceLabel = computed(() =>
   runtimeConfig.dataSource === 'mock' ? 'Mock 演示数据' : '实时 API 数据',
 )
 const currentTimestamp = computed(() => telemetry.value?.timestamp ?? task.value?.updated_at ?? null)
-const trendStart = computed(() => metrics.value.trend[0]?.timestamp ?? null)
-const trendEnd = computed(() => metrics.value.trend.at(-1)?.timestamp ?? null)
-const hasChartData = computed(() =>
-  metrics.value.trend.some((point) => point.temperature !== null || point.humidity !== null),
-)
 const alarmPreview = computed(() => store.alarms.slice(0, 3))
 const riskLabel = computed(() => {
   if (!telemetry.value) return '等待设备上报'
@@ -83,6 +64,10 @@ async function toggleFullscreen() {
   } catch {
     fullscreenError.value = '无法进入全屏模式，请检查浏览器权限后重试。'
   }
+}
+
+function retryLoad() {
+  void Promise.all([store.bootstrap(), store.loadTrace()])
 }
 
 onMounted(() => {
@@ -124,10 +109,12 @@ onUnmounted(() => {
 
     <p v-if="fullscreenError" class="dashboard-fullscreen-error" role="status">{{ fullscreenError }}</p>
 
-    <div v-if="store.loading && !task" class="dashboard-loading state-panel">
-      <span class="loader"></span>
-      正在加载单任务监测数据…
-    </div>
+    <AsyncStatePanel
+      v-if="store.loading && !task"
+      state="loading"
+      title="正在加载单任务监测数据"
+      description="正在同步当前任务、遥测历史、告警和交接节点。"
+    />
 
     <template v-else-if="task">
       <section class="dashboard-task-strip" aria-label="当前任务摘要">
@@ -190,30 +177,8 @@ onUnmounted(() => {
               <span>ENVIRONMENT TREND</span>
               <h3>温湿度历史趋势</h3>
             </div>
-            <div class="dashboard-chart-legend" aria-label="趋势图图例">
-              <span class="dashboard-legend-temperature">温度 °C</span>
-              <span class="dashboard-legend-humidity">湿度 %RH</span>
-            </div>
           </div>
-          <div v-if="hasChartData" class="dashboard-chart-wrap">
-            <svg
-              class="dashboard-trend-svg"
-              :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
-              role="img"
-              aria-label="温度和湿度历史趋势"
-            >
-              <line :x1="CHART_PADDING" :x2="CHART_WIDTH - CHART_PADDING" :y1="CHART_HEIGHT / 4" :y2="CHART_HEIGHT / 4" />
-              <line :x1="CHART_PADDING" :x2="CHART_WIDTH - CHART_PADDING" :y1="CHART_HEIGHT / 2" :y2="CHART_HEIGHT / 2" />
-              <line :x1="CHART_PADDING" :x2="CHART_WIDTH - CHART_PADDING" :y1="(CHART_HEIGHT / 4) * 3" :y2="(CHART_HEIGHT / 4) * 3" />
-              <path v-if="temperaturePath" class="dashboard-temperature-line" :d="temperaturePath" />
-              <path v-if="humidityPath" class="dashboard-humidity-line" :d="humidityPath" />
-            </svg>
-            <div class="dashboard-chart-axis">
-              <span>{{ formatTime(trendStart) }}</span>
-              <span>{{ formatTime(trendEnd) }}</span>
-            </div>
-          </div>
-          <div v-else class="dashboard-empty-chart">暂无历史温湿度记录，等待后端返回遥测数据。</div>
+          <TelemetryTrendChart :history="store.history" />
         </article>
 
         <article class="dashboard-alert-card">
@@ -260,8 +225,12 @@ onUnmounted(() => {
       </section>
     </template>
 
-    <div v-else class="dashboard-empty-state state-panel is-error">
-      暂未获取到当前任务数据，请检查数据源或网络后重试。
-    </div>
+    <AsyncStatePanel
+      v-else
+      :state="store.monitoringError ? 'offline' : 'error'"
+      title="暂未获取到当前任务数据"
+      description="请检查数据源或网络后重新同步；页面不会用其他任务数据替代当前任务。"
+      @retry="retryLoad"
+    />
   </section>
 </template>

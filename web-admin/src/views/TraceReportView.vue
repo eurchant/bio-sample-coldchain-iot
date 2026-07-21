@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import { formatTime, formatValue, statusTone, taskLabel, temperatureLabel } from '../lib/format'
 import { printTraceReport } from '../lib/reportExport'
 import { useTaskStore } from '../stores/task'
@@ -25,6 +26,10 @@ function exportPdf() {
   if (!report.value) return
   printTraceReport(report.value.task.task_id, report.value.task.updated_at)
 }
+
+function retryLoad() {
+  void store.loadTrace()
+}
 </script>
 
 <template>
@@ -48,10 +53,12 @@ function exportPdf() {
       </div>
     </div>
 
-    <div v-if="store.traceLoading && !report" class="state-panel">
-      <span class="loader"></span>
-      正在汇总追溯报告…
-    </div>
+    <AsyncStatePanel
+      v-if="store.traceLoading && !report"
+      state="loading"
+      title="正在汇总追溯报告"
+      description="报告内容只使用当前后端追溯接口返回的任务、交接与异常数据。"
+    />
 
     <article v-else-if="report" class="trace-document">
       <header class="report-header">
@@ -153,6 +160,12 @@ function exportPdf() {
       </footer>
     </article>
 
-    <div v-else class="state-panel is-error">报告暂不可用，请检查 API 或 Mock 数据后重试。</div>
+    <AsyncStatePanel
+      v-else
+      :state="store.monitoringError ? 'offline' : 'error'"
+      title="报告暂不可用"
+      description="请检查 API 或 Mock 数据后重新加载；页面不会用静态内容替代报告。"
+      @retry="retryLoad"
+    />
   </section>
 </template>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import {
   boxLabel,
   formatTime,
@@ -75,6 +76,10 @@ async function submitAction() {
   if (!pendingAction.value) return
   await store.performAction(pendingAction.value, reason.value)
   if (!store.error) closeAction()
+}
+
+function retryLoad() {
+  void store.bootstrap()
 }
 </script>
 
@@ -263,7 +268,13 @@ async function submitAction() {
       </article>
     </template>
 
-    <div v-else class="state-panel is-error">没有读取到任务详情，请刷新后重试。</div>
+    <AsyncStatePanel
+      v-else
+      :state="store.monitoringError ? 'offline' : 'error'"
+      title="没有读取到任务详情"
+      description="请检查数据源配置和网络连接后重新同步。"
+      @retry="retryLoad"
+    />
 
     <div v-if="pendingAction" class="modal-backdrop" role="presentation" @click.self="closeAction">
       <section class="action-modal" role="dialog" aria-modal="true" :aria-label="actionCopy[pendingAction].title">

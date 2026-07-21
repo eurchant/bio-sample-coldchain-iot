@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import {
   buildHandoffRouteNodes,
   getGnssTrajectoryEmptyState,
@@ -20,6 +21,10 @@ onMounted(() => {
   if (!store.task && !store.loading) void store.bootstrap()
   if (!store.trace && !store.traceLoading) void store.loadTrace()
 })
+
+function retryLoad() {
+  void Promise.all([store.bootstrap(), store.loadTrace()])
+}
 </script>
 
 <template>
@@ -32,10 +37,12 @@ onMounted(() => {
       </div>
     </div>
 
-    <div v-if="store.loading && !task" class="state-panel">
-      <span class="loader"></span>
-      正在读取任务交接信息…
-    </div>
+    <AsyncStatePanel
+      v-if="store.loading && !task"
+      state="loading"
+      title="正在读取任务交接信息"
+      description="正在同步当前任务和后端提供的交接节点。"
+    />
 
     <div v-else-if="task && progress" class="task-map-content">
       <section class="handoff-summary" aria-label="任务交接进度">
@@ -94,6 +101,12 @@ onMounted(() => {
       </section>
     </div>
 
-    <div v-else class="state-panel is-error">暂无任务数据，无法生成交接路径。</div>
+    <AsyncStatePanel
+      v-else
+      :state="store.monitoringError ? 'offline' : 'error'"
+      title="暂无任务数据，无法生成交接路径"
+      description="恢复连接后可重新加载；没有 GNSS 数据时仍只显示非地理交接路径。"
+      @retry="retryLoad"
+    />
   </section>
 </template>

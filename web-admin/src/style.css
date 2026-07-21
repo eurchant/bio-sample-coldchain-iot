@@ -1,11 +1,76 @@
 @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap");
 
 :root {
+  --cc-bg: #07191a;
+  --cc-bg-grid: rgba(107, 214, 183, 0.035);
+  --cc-surface: rgba(10, 34, 35, 0.88);
+  --cc-surface-raised: rgba(14, 47, 47, 0.76);
+  --cc-border: rgba(172, 225, 207, 0.14);
+  --cc-text: #edf7f2;
+  --cc-text-muted: #8ca7a0;
+  --cc-accent: #63d7b8;
+  --cc-accent-soft: rgba(99, 215, 184, 0.12);
+  --text-primary: var(--cc-text);
+  --text-secondary: rgba(237, 247, 242, 0.7);
+  --panel-surface: var(--cc-surface);
+  --border-subtle: var(--cc-border);
+  --panel-shadow: 0 14px 35px rgba(0, 0, 0, 0.13);
+  --state-info: #8fe2cb;
+  --state-info-surface: rgba(99, 215, 184, 0.12);
+  --state-info-border: rgba(99, 215, 184, 0.3);
+  --state-warning: #ffc77d;
+  --state-warning-surface: rgba(255, 174, 76, 0.12);
+  --state-warning-border: rgba(255, 174, 76, 0.35);
+  --state-danger: #ff9b91;
+  --state-danger-surface: rgba(255, 111, 97, 0.12);
+  --state-danger-border: rgba(255, 111, 97, 0.35);
+  --button-primary-text: #06221d;
+  --button-primary-background: #89e0c7;
+  --button-primary-border: #89e0c7;
+  --focus-ring: rgba(137, 224, 199, 0.55);
+  --chart-text: #dff8ed;
+  --chart-muted: #88a99e;
+  --chart-grid: rgba(141, 213, 190, 0.16);
+  --chart-tooltip-background: #0b2925;
+  --chart-temperature: #6de0b7;
+  --chart-humidity: #6cc4ee;
   color: #edf7f2;
   background: #07191a;
   font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+:root[data-theme="light"] {
+  --cc-bg: #edf5f2;
+  --cc-bg-grid: rgba(31, 128, 104, 0.08);
+  --cc-surface: rgba(255, 255, 255, 0.86);
+  --cc-surface-raised: rgba(247, 252, 250, 0.94);
+  --cc-border: rgba(20, 77, 65, 0.16);
+  --cc-text: #163c35;
+  --cc-text-muted: #58716b;
+  --cc-accent: #14775f;
+  --cc-accent-soft: rgba(20, 119, 95, 0.11);
+  --text-secondary: rgba(22, 60, 53, 0.72);
+  --panel-shadow: 0 14px 35px rgba(20, 72, 61, 0.08);
+  --state-info: #14775f;
+  --state-info-surface: rgba(20, 119, 95, 0.1);
+  --state-info-border: rgba(20, 119, 95, 0.27);
+  --button-primary-text: #f6fffb;
+  --button-primary-background: #14775f;
+  --button-primary-border: #14775f;
+  --focus-ring: rgba(20, 119, 95, 0.42);
+  --chart-text: #1d3931;
+  --chart-muted: #638078;
+  --chart-grid: rgba(29, 57, 49, 0.14);
+  --chart-tooltip-background: #ffffff;
+  --chart-temperature: #bc5038;
+  --chart-humidity: #267aaa;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 * {
@@ -2989,5 +3054,283 @@ p {
 @media print {
   .pdf-export-control {
     display: none !important;
+  }
+}
+
+/* Daylight laboratory skin. It deliberately keeps status colors semantic while
+ * moving the workspace from a dark transport console to a readable paper-like
+ * review surface. */
+:root[data-theme="light"] body {
+  color: var(--cc-text);
+  background:
+    radial-gradient(circle at 87% -6%, rgba(53, 153, 121, 0.2), transparent 30rem),
+    linear-gradient(135deg, var(--cc-bg-grid) 1px, transparent 1px),
+    var(--cc-bg);
+  background-size: auto, 30px 30px, auto;
+}
+
+:root[data-theme="light"] .app-frame,
+:root[data-theme="light"] .content-shell,
+:root[data-theme="light"] .login-page {
+  color: var(--cc-text);
+}
+
+:root[data-theme="light"] .sidebar {
+  background: rgba(239, 247, 244, 0.9);
+  border-right-color: var(--cc-border);
+  box-shadow: 12px 0 32px rgba(28, 76, 65, 0.05);
+}
+
+:root[data-theme="light"] .sidebar::before {
+  border-color: rgba(20, 119, 95, 0.23);
+}
+
+:root[data-theme="light"] .brand-mark {
+  border-color: var(--cc-accent);
+  background: #e0f2eb;
+}
+
+:root[data-theme="light"] .brand-mark i {
+  background: var(--cc-accent);
+}
+
+:root[data-theme="light"] .brand strong,
+:root[data-theme="light"] .topbar h1,
+:root[data-theme="light"] .page-heading h2,
+:root[data-theme="light"] .task-title-line h3,
+:root[data-theme="light"] .trace-document h3,
+:root[data-theme="light"] .dashboard-page h2,
+:root[data-theme="light"] .dashboard-page h3,
+:root[data-theme="light"] .login-card h1 {
+  color: var(--cc-text);
+}
+
+:root[data-theme="light"] .brand small,
+:root[data-theme="light"] .side-status small,
+:root[data-theme="light"] .side-footnote,
+:root[data-theme="light"] .connection-state,
+:root[data-theme="light"] .page-heading > div > p:last-child,
+:root[data-theme="light"] .dashboard-page > header p,
+:root[data-theme="light"] .dashboard-metric-card p,
+:root[data-theme="light"] .dashboard-metric-card em,
+:root[data-theme="light"] .dashboard-task-strip p,
+:root[data-theme="light"] .dashboard-chart-axis,
+:root[data-theme="light"] .report-footer,
+:root[data-theme="light"] .report-header p,
+:root[data-theme="light"] .report-section-title p {
+  color: var(--cc-text-muted);
+}
+
+:root[data-theme="light"] .nav-item {
+  color: #54736c;
+}
+
+:root[data-theme="light"] .nav-item:hover {
+  color: var(--cc-text);
+  background: var(--cc-accent-soft);
+}
+
+:root[data-theme="light"] .nav-item.router-link-active {
+  color: #0e5f4c;
+  border-color: rgba(20, 119, 95, 0.28);
+  background: linear-gradient(90deg, rgba(20, 119, 95, 0.14), rgba(20, 119, 95, 0.03));
+}
+
+:root[data-theme="light"] .nav-code,
+:root[data-theme="light"] .eyebrow,
+:root[data-theme="light"] .section-kicker {
+  color: var(--cc-accent);
+}
+
+:root[data-theme="light"] .topbar {
+  border-bottom-color: var(--cc-border);
+}
+
+:root[data-theme="light"] .side-status,
+:root[data-theme="light"] .identity-menu,
+:root[data-theme="light"] .panel,
+:root[data-theme="light"] .task-table-card,
+:root[data-theme="light"] .trace-document,
+:root[data-theme="light"] .state-panel,
+:root[data-theme="light"] .compact-empty,
+:root[data-theme="light"] .event-row,
+:root[data-theme="light"] .history-row,
+:root[data-theme="light"] .handoff-route-node,
+:root[data-theme="light"] .gnss-empty-state,
+:root[data-theme="light"] .dashboard-page,
+:root[data-theme="light"] .dashboard-status-card,
+:root[data-theme="light"] .dashboard-route-card,
+:root[data-theme="light"] .dashboard-refresh-card,
+:root[data-theme="light"] .dashboard-metric-card,
+:root[data-theme="light"] .dashboard-chart-card,
+:root[data-theme="light"] .dashboard-handoff-card,
+:root[data-theme="light"] .dashboard-offline-notice,
+:root[data-theme="light"] .dashboard-source,
+:root[data-theme="light"] .dashboard-empty-list,
+:root[data-theme="light"] .dashboard-alarm-item,
+:root[data-theme="light"] .login-card {
+  color: var(--cc-text);
+  border-color: var(--cc-border);
+  background: var(--cc-surface);
+  box-shadow: 0 12px 28px rgba(20, 72, 61, 0.07);
+}
+
+:root[data-theme="light"] .task-row,
+:root[data-theme="light"] .task-table-head,
+:root[data-theme="light"] .report-task-strip,
+:root[data-theme="light"] .report-route,
+:root[data-theme="light"] .report-event,
+:root[data-theme="light"] .dashboard-handoff-node {
+  border-color: var(--cc-border);
+  background: var(--cc-surface-raised);
+}
+
+:root[data-theme="light"] .task-row:hover,
+:root[data-theme="light"] .dashboard-detail-link:hover {
+  background: rgba(20, 119, 95, 0.08);
+}
+
+:root[data-theme="light"] .task-row strong,
+:root[data-theme="light"] .task-row b,
+:root[data-theme="light"] .event-row strong,
+:root[data-theme="light"] .history-row strong,
+:root[data-theme="light"] .report-task-strip strong,
+:root[data-theme="light"] .report-route strong,
+:root[data-theme="light"] .report-event strong,
+:root[data-theme="light"] .dashboard-task-strip strong,
+:root[data-theme="light"] .dashboard-metric-card strong,
+:root[data-theme="light"] .dashboard-handoff-node strong,
+:root[data-theme="light"] .gnss-empty-state h3,
+:root[data-theme="light"] .handoff-route-node strong {
+  color: var(--cc-text);
+}
+
+:root[data-theme="light"] .ghost-button,
+:root[data-theme="light"] .icon-button,
+:root[data-theme="light"] .dashboard-fullscreen-button,
+:root[data-theme="light"] .identity-menu button {
+  color: #0e5f4c;
+  border-color: rgba(20, 119, 95, 0.28);
+  background: rgba(20, 119, 95, 0.06);
+}
+
+:root[data-theme="light"] .ghost-button:hover:not(:disabled),
+:root[data-theme="light"] .icon-button:hover,
+:root[data-theme="light"] .dashboard-fullscreen-button:hover,
+:root[data-theme="light"] .identity-menu button:hover {
+  background: rgba(20, 119, 95, 0.14);
+}
+
+:root[data-theme="light"] .dashboard-trend-svg line {
+  stroke: rgba(20, 77, 65, 0.14);
+}
+
+:root[data-theme="light"] .dashboard-temperature-line {
+  stroke: #c65337;
+}
+
+:root[data-theme="light"] .dashboard-humidity-line {
+  stroke: #267aaa;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .page-section > * {
+    animation: coldchain-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .page-section > *:nth-child(2) {
+    animation-delay: 45ms;
+  }
+
+  .page-section > *:nth-child(3) {
+    animation-delay: 85ms;
+  }
+}
+
+@keyframes coldchain-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  color: var(--cc-text-muted);
+  background: var(--cc-surface);
+  border: 1px solid var(--cc-border);
+  border-radius: 999px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+}
+
+.theme-toggle-label {
+  padding: 0 7px 0 9px;
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.theme-toggle button {
+  min-height: 27px;
+  padding: 0 8px;
+  color: inherit;
+  font-size: 11px;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  transition: color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.theme-toggle button:hover {
+  color: var(--cc-text);
+  background: var(--cc-accent-soft);
+}
+
+.theme-toggle button[aria-pressed="true"] {
+  color: #06221d;
+  font-weight: 700;
+  background: var(--cc-accent);
+  box-shadow: 0 2px 7px rgba(11, 75, 61, 0.22);
+}
+
+.theme-toggle button:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+:root[data-theme="light"] .theme-toggle {
+  box-shadow: 0 8px 20px rgba(20, 72, 61, 0.08);
+}
+
+:root[data-theme="light"] .theme-toggle button[aria-pressed="true"] {
+  color: #f6fffb;
+}
+
+@media (max-width: 560px) {
+  .theme-toggle-label {
+    display: none;
+  }
+
+  .theme-toggle button {
+    padding: 0 7px;
   }
 }

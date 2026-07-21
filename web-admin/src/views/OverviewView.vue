@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
+import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import { boxLabel, formatTime, formatValue, statusTone, taskLabel, temperatureLabel } from '../lib/format'
 import { useTaskStore } from '../stores/task'
 
 const store = useTaskStore()
 const task = computed(() => store.task)
 const telemetry = computed(() => store.telemetry)
+
+function retryLoad() {
+  void store.bootstrap()
+}
 
 const taskStats = computed(() => [
   {
@@ -46,10 +51,12 @@ const taskStats = computed(() => [
       </button>
     </div>
 
-    <div v-if="store.loading && !task" class="state-panel">
-      <span class="loader"></span>
-      正在读取任务与监测数据…
-    </div>
+    <AsyncStatePanel
+      v-if="store.loading && !task"
+      state="loading"
+      title="正在读取任务与监测数据"
+      description="正在同步当前任务、最新遥测、历史记录和告警。"
+    />
 
     <template v-else-if="task">
       <div class="metric-grid">
@@ -145,8 +152,12 @@ const taskStats = computed(() => [
       </div>
     </template>
 
-    <div v-else class="state-panel is-error">
-      没有读取到任务数据。请检查数据源配置和网络连接后重试。
-    </div>
+    <AsyncStatePanel
+      v-else
+      :state="store.monitoringError ? 'offline' : 'error'"
+      title="没有读取到任务数据"
+      description="请检查数据源配置和网络连接后重新同步。"
+      @retry="retryLoad"
+    />
   </section>
 </template>

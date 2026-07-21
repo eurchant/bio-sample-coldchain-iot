@@ -1,6 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+import ThemeToggle from './components/ThemeToggle.vue'
+import {
+  SYSTEM_THEME_MEDIA_QUERY,
+  applyThemePreference,
+  getSystemPrefersDark,
+  readThemePreference,
+  saveThemePreference,
+  type ThemePreference,
+} from './lib/theme'
 import { runtimeConfig } from './services/config'
 import { hasRoleAccess, type DemoRole, useAuthStore } from './stores/auth'
 import { useTaskStore } from './stores/task'
@@ -16,6 +25,7 @@ const store = useTaskStore()
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const themePreference = ref<ThemePreference>(readThemePreference())
 
 const navItems: NavigationItem[] = [
   { label: '任务总览', hint: 'TASK', to: '/' },
@@ -34,6 +44,7 @@ const sourceLabel = computed(() =>
 )
 
 let pollingId: number | undefined
+let systemThemeQuery: MediaQueryList | null = null
 
 function stopPolling() {
   if (pollingId !== undefined) {
@@ -58,7 +69,29 @@ function logout() {
   void router.replace({ name: 'login' })
 }
 
+function syncTheme() {
+  applyThemePreference(themePreference.value, {
+    systemPrefersDark: systemThemeQuery?.matches ?? getSystemPrefersDark(),
+  })
+}
+
+function updateTheme(preference: ThemePreference) {
+  themePreference.value = preference
+  saveThemePreference(preference)
+  syncTheme()
+}
+
+function syncSystemTheme() {
+  if (themePreference.value === 'system') syncTheme()
+}
+
 onMounted(() => {
+  systemThemeQuery =
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia(SYSTEM_THEME_MEDIA_QUERY)
+      : null
+  systemThemeQuery?.addEventListener('change', syncSystemTheme)
+  syncTheme()
   if (auth.isAuthenticated) void startPolling()
 })
 
@@ -74,6 +107,8 @@ watch(
 )
 
 onUnmounted(() => {
+  systemThemeQuery?.removeEventListener('change', syncSystemTheme)
+  systemThemeQuery = null
   stopPolling()
 })
 </script>
@@ -124,6 +159,7 @@ onUnmounted(() => {
           <h1>生物样本冷链转运管理</h1>
         </div>
         <div class="topbar-actions">
+          <ThemeToggle :model-value="themePreference" @update:model-value="updateTheme" />
           <div class="connection-state">
             <span :class="['connection-dot', { 'is-alert': Boolean(store.monitoringError) }]"></span>
             <span>{{ store.monitoringError ? '监测连接待恢复' : '监测连接正常' }}</span>
