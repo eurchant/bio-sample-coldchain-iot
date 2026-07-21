@@ -2,12 +2,14 @@
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { formatTime, formatValue, statusTone, taskLabel, temperatureLabel } from '../lib/format'
+import { printTraceReport } from '../lib/reportExport'
 import { useTaskStore } from '../stores/task'
 
 const route = useRoute()
 const store = useTaskStore()
 const report = computed(() => store.trace)
 const routeTaskId = computed(() => String(route.params.taskId || ''))
+const canExportPdf = computed(() => Boolean(report.value))
 
 const handoffLabel: Record<string, string> = {
   started: '发出交接',
@@ -19,8 +21,9 @@ onMounted(() => {
   void store.loadTrace()
 })
 
-function printReport() {
-  window.print()
+function exportPdf() {
+  if (!report.value) return
+  printTraceReport(report.value.task.task_id, report.value.task.updated_at)
 }
 </script>
 
@@ -36,7 +39,12 @@ function printReport() {
         <button class="ghost-button" type="button" @click="store.loadTrace()" :disabled="store.traceLoading">
           {{ store.traceLoading ? '生成中…' : '刷新报告' }}
         </button>
-        <button class="print-button" type="button" @click="printReport">打印视图</button>
+        <div class="pdf-export-control">
+          <button class="print-button" type="button" :disabled="!canExportPdf" @click="exportPdf">
+            打印 / 保存 PDF
+          </button>
+          <small>在系统打印窗口中选择“另存为 PDF”</small>
+        </div>
       </div>
     </div>
 
