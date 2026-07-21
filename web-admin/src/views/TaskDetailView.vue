@@ -177,17 +177,17 @@ async function submitAction() {
           </div>
           <p class="handoff-lead">界面只发起操作请求，不在前端推断状态流转。</p>
           <div class="action-stack">
-            <button class="primary-action" type="button" :disabled="!canStart || store.actionLoading !== null" @click="openAction('start')">
+            <button data-testid="start-task" class="primary-action" type="button" :disabled="!canStart || store.actionLoading !== null" @click="openAction('start')">
               <span>01</span>
               <b>{{ store.actionLoading === 'start' ? '正在发出…' : '发出交接' }}</b>
               <small>进入运输中</small>
             </button>
-            <button class="secondary-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('sign')">
+            <button data-testid="sign-task" class="secondary-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('sign')">
               <span>02</span>
               <b>{{ store.actionLoading === 'sign' ? '正在签收…' : '到达签收' }}</b>
               <small>完成交接</small>
             </button>
-            <button class="danger-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('reject')">
+            <button data-testid="reject-task" class="danger-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('reject')">
               <span>03</span>
               <b>{{ store.actionLoading === 'reject' ? '正在提交…' : '拒收并记录原因' }}</b>
               <small>保留追溯证据</small>

@@ -49,6 +49,12 @@ function normalizeError(error: unknown): ApiError {
   if (axios.isAxiosError(error)) {
     const axiosError = error as AxiosError<Partial<ApiEnvelope<null>>>
     const body = axiosError.response?.data
+    if (!axiosError.response) {
+      const isTimeout = axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT'
+      return new ApiError(
+        isTimeout ? '后端响应超时，请检查网络或服务状态' : '无法连接后端服务，请检查网络或服务是否运行',
+      )
+    }
     return new ApiError(
       body?.message || axiosError.message || '网络请求失败',
       axiosError.response?.status,
