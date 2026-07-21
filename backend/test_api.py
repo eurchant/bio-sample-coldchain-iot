@@ -99,13 +99,14 @@ def test_task_handoff_and_report():
     events = client.get("/api/device/events")
     assert events.status_code == 200
     event_names = [item["event_name"] for item in events.json()]
-    assert "开箱事件" in event_names
+    assert "开箱" in event_names
     assert "轻微晃动" in event_names
     assert "温度异常" in event_names
 
     current = client.get("/api/task/current")
     assert current.status_code == 200
-    assert current.json()["status"] == "异常"
+    assert current.json()["status"] == "运输中"
+    assert current.json()["abnormal_count"] > 0
 
     signed = client.post("/api/task/sign")
     assert signed.status_code == 200
@@ -144,6 +145,9 @@ def test_v1_contract_and_task_queries_use_unified_response():
     task_data = task.json()["data"]
     assert task_data["task_id"] == "TASK-001"
     assert task_data["status"] == "pending_pack"
+    assert "abnormal_count" in task_data
+    assert "latest_temperature" in task_data
+    assert "latest_humidity" in task_data
 
     missing = client.get("/api/v1/tasks/DOES-NOT-EXIST")
     assert missing.status_code == 404

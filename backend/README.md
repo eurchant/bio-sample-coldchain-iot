@@ -38,6 +38,81 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 按 `Control + C` 停止服务。
 
+## 统一数据结构与状态
+
+### 任务 Task
+
+任务对象统一包含以下字段（snake_case）：
+
+```json
+{
+  "task_id": "TASK-001",
+  "device_id": "CLD-001",
+  "sample_name": "生物样本转运箱 A",
+  "sender": "高校实验室",
+  "receiver": "医院检验科",
+  "carrier": "演示人员",
+  "status": "in_transit",
+  "started_at": "2026-07-21T10:00:00+08:00",
+  "signed_at": null,
+  "rejected_at": null,
+  "rejection_reason": null,
+  "updated_at": "2026-07-21T10:00:00+08:00",
+  "abnormal_count": 0,
+  "latest_temperature": 4.2,
+  "latest_humidity": 62.5,
+  "latest_box_status": "BOX_CLOSED",
+  "latest_move_status": "STABLE",
+  "latest_temp_status": "TEMP_OK"
+}
+```
+
+### 任务状态
+
+后端内部统一使用英文键，旧版接口和首页看板自动映射为中文：
+
+| 状态键 | 中文显示 | 含义 |
+|--------|----------|------|
+| `pending_pack` | 待发出 | 未点击发出 |
+| `pending_handoff` | 待发出 | 未点击发出 |
+| `in_transit` | 运输中 | 已发出，运输中 |
+| `arrived` | 已到达 | 已到达（预留） |
+| `signed` | 已签收 | 已签收 |
+| `rejected` | 已拒收 | 已拒收 |
+| `canceled` | 已取消 | 已取消（预留） |
+
+### 异常事件
+
+异常事件规则：
+
+- `box_status = BOX_OPEN` → 开箱
+- `move_status = MILD` → 轻微晃动
+- `move_status = SEVERE` → 剧烈晃动
+- `move_status = IMPACT` → 疑似碰撞
+- `move_status = FREE_FALL` → 疑似跌落
+- `temp_status = TEMP_ALERT` → 温度异常
+
+异常事件统一字段：
+
+```json
+{
+  "event_id": 1,
+  "id": 1,
+  "data_id": 2,
+  "task_id": "TASK-001",
+  "device_id": "CLD-001",
+  "event_type": "BOX_OPEN",
+  "event_name": "开箱",
+  "event_level": "medium",
+  "description": "光敏检测到箱体疑似打开",
+  "event_detail": "光敏检测到箱体疑似打开",
+  "timestamp": "2026-07-21T10:05:00+08:00",
+  "created_at": "2026-07-21T10:05:00+08:00"
+}
+```
+
+`event_level` 映射：`SEVERE/IMPACT/FREE_FALL` 为 `high`，`TEMP_ALERT/BOX_OPEN` 为 `medium`，`MILD` 为 `low`。
+
 ## 团队接口分工
 
 开发板继续使用现有地址，不需要修改程序：

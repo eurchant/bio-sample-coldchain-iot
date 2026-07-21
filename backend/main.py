@@ -40,6 +40,25 @@ BOX_STATUSES = ["BOX_OPEN", "BOX_CLOSED"]
 MOVE_STATUSES = ["STABLE", "MILD", "SEVERE", "IMPACT", "FREE_FALL"]
 TEMPERATURE_STATUSES = ["TEMP_OK", "TEMP_ALERT"]
 
+TASK_STATUS_LABELS = {
+    "pending_pack": "待发出",
+    "pending_handoff": "待发出",
+    "in_transit": "运输中",
+    "arrived": "已到达",
+    "signed": "已签收",
+    "rejected": "已拒收",
+    "canceled": "已取消",
+}
+
+EVENT_LEVELS = {
+    "SEVERE": "high",
+    "IMPACT": "high",
+    "FREE_FALL": "high",
+    "TEMP_ALERT": "medium",
+    "BOX_OPEN": "medium",
+    "MILD": "low",
+}
+
 
 class DeviceDataIn(BaseModel):
     device_id: str = Field(..., examples=["CLD-001"])
@@ -133,6 +152,7 @@ def init_db() -> None:
         ensure_column(conn, "task_handoff", "rejected_at", "TEXT")
         ensure_column(conn, "task_handoff", "rejection_reason", "TEXT")
         ensure_demo_task(conn)
+        migrate_task_status_column(conn)
 
 
 def ensure_column(
@@ -149,6 +169,18 @@ def ensure_column(
         conn.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
         )
+
+
+def migrate_task_status_column(conn: sqlite3.Connection) -> None:
+    """将旧版中文状态迁移为规范键，保留历史数据。"""
+    for row in conn.execute("SELECT * FROM task_handoff").fetchall():
+        task = row_to_dict(row)
+        canonical = canonical_task_status(task)
+        if row["status"] != canonical:
+            conn.execute(
+                "UPDATE task_handoff SET status = ? WHERE task_id = ?",
+                (canonical, task["task_id"]),
+            )
 
 
 def ensure_demo_task(conn: sqlite3.Connection) -> None:
@@ -183,7 +215,7 @@ def ensure_demo_task(conn: sqlite3.Connection) -> None:
             DEMO_TASK["sender"],
             DEMO_TASK["receiver"],
             DEMO_TASK["carrier"],
-            "待发出",
+            "pending_pack",
             None,
             None,
             now_iso(),
@@ -243,7 +275,7 @@ def build_event_items(data: DeviceDataIn, event_type: str) -> list[tuple[str, st
     temp_status = data.temp_status.upper()
 
     if box_status == "BOX_OPEN":
-        events.append(("BOX_OPEN", "开箱事件", "光敏检测到箱体疑似打开"))
+        events.append(("BOX_OPEN", "开箱", "光敏检测到箱体疑似打开"))
     if move_status == "MILD":
         events.append(("MILD", "轻微晃动", "三轴加速度检测到轻微晃动"))
     if move_status == "SEVERE":
@@ -289,16 +321,6 @@ def insert_event_logs(
                 timestamp,
                 created_at,
             ),
-        )
-
-    if events and data.task_id == DEMO_TASK["task_id"]:
-        conn.execute(
-            """
-            UPDATE task_handoff
-            SET status = ?, updated_at = ?
-            WHERE task_id = ? AND status != ?
-            """,
-            ("异常", created_at, DEMO_TASK["task_id"], "已签收"),
         )
 
 
@@ -379,6 +401,62 @@ def normalize_telemetry(row: sqlite3.Row) -> dict:
     return item
 
 
+def event_level(event_type: str) -> str:
+    return EVENT_LEVELS.get(event_type, "medium")
+
+
+def normalize_event(row: sqlite3.Row) -> dict:
+    item = row_to_dict(row)
+    item["event_id"] = item["id"]
+    item["description"] = item["event_detail"]
+    item["event_level"] = event_level(item["event_type"])
+    return item
+
+
+def task_latest_telemetry(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    row = conn.execute(
+        """
+        SELECT * FROM device_data
+        WHERE task_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    return normalize_telemetry(row) if row else None
+
+
+def task_abnormal_count(conn: sqlite3.Connection, task_id: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS count FROM event_log WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()["count"]
+
+
+def enrich_task(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
+    task = serialize_task(row)
+    task_id = task["task_id"]
+    latest = task_latest_telemetry(conn, task_id)
+    task["abnormal_count"] = task_abnormal_count(conn, task_id)
+    if latest:
+        task["latest_temperature"] = latest["temperature"]
+        task["latest_humidity"] = latest["humidity"]
+        task["latest_box_status"] = latest["box_status"]
+        task["latest_move_status"] = latest["move_status"]
+        task["latest_temp_status"] = latest["temp_status"]
+    else:
+        task["latest_temperature"] = None
+        task["latest_humidity"] = None
+        task["latest_box_status"] = None
+        task["latest_move_status"] = None
+        task["latest_temp_status"] = None
+    return task
+
+
+def legacy_task_view(task: dict) -> dict:
+    view = dict(task)
+    view["status"] = TASK_STATUS_LABELS.get(view["status"], view["status"])
+    return view
+
+
 def get_trace_report_data(conn: sqlite3.Connection, task_id: str) -> dict:
     task_row = get_task_by_id(conn, task_id)
     if not task_row:
@@ -423,12 +501,12 @@ def get_trace_report_data(conn: sqlite3.Connection, task_id: str) -> dict:
 
     summary = row_to_dict(stats)
     summary["event_count"] = event_count
-    task = serialize_task(task_row)
+    task = enrich_task(task_row, conn)
     return {
         "task": task,
         "latest": normalize_telemetry(latest) if latest else None,
         "summary": summary,
-        "events": [row_to_dict(row) for row in events],
+        "events": [normalize_event(row) for row in events],
         "handoff_nodes": build_handoff_nodes(task),
     }
 
@@ -492,7 +570,7 @@ def get_latest_device_data() -> dict:
         row = conn.execute(
             "SELECT * FROM device_data ORDER BY id DESC LIMIT 1"
         ).fetchone()
-    return row_to_dict(row) if row else {}
+    return normalize_telemetry(row) if row else {}
 
 
 @app.get("/api/device/history")
@@ -502,7 +580,7 @@ def get_device_history() -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM device_data ORDER BY id DESC LIMIT 100"
         ).fetchall()
-    return [row_to_dict(row) for row in rows]
+    return [normalize_telemetry(row) for row in rows]
 
 
 @app.get("/api/device/events")
@@ -517,15 +595,18 @@ def get_device_events() -> list[dict]:
             LIMIT 100
             """
         ).fetchall()
-    return [row_to_dict(row) for row in rows]
+    return [normalize_event(row) for row in rows]
 
 
 @app.post("/api/task/start")
 def start_task() -> dict:
     init_db()
-    started_at = now_iso()
+    timestamp = now_iso()
     with get_connection() as conn:
         ensure_demo_task(conn)
+        row = get_task_row(conn)
+        if canonical_task_status(row_to_dict(row)) == "in_transit":
+            return {"ok": True, "task": legacy_task_view(enrich_task(row, conn))}
         conn.execute(
             """
             UPDATE task_handoff
@@ -533,18 +614,22 @@ def start_task() -> dict:
                 rejected_at = NULL, rejection_reason = NULL, updated_at = ?
             WHERE task_id = ?
             """,
-            ("运输中", started_at, started_at, DEMO_TASK["task_id"]),
+            ("in_transit", timestamp, timestamp, DEMO_TASK["task_id"]),
         )
         row = get_task_row(conn)
-    return {"ok": True, "task": row_to_dict(row)}
+    return {"ok": True, "task": legacy_task_view(enrich_task(row, conn))}
 
 
 @app.post("/api/task/sign")
 def sign_task() -> dict:
     init_db()
-    signed_at = now_iso()
     with get_connection() as conn:
         ensure_demo_task(conn)
+        row = get_task_row(conn)
+        if canonical_task_status(row_to_dict(row)) == "signed":
+            return {"ok": True, "task": legacy_task_view(enrich_task(row, conn))}
+
+        timestamp = now_iso()
         conn.execute(
             """
             UPDATE task_handoff
@@ -552,10 +637,10 @@ def sign_task() -> dict:
                 rejection_reason = NULL, updated_at = ?
             WHERE task_id = ?
             """,
-            ("已签收", signed_at, signed_at, DEMO_TASK["task_id"]),
+            ("signed", timestamp, timestamp, DEMO_TASK["task_id"]),
         )
         row = get_task_row(conn)
-    return {"ok": True, "task": row_to_dict(row)}
+    return {"ok": True, "task": legacy_task_view(enrich_task(row, conn))}
 
 
 @app.get("/api/task/current")
@@ -563,14 +648,14 @@ def get_current_task() -> dict:
     init_db()
     with get_connection() as conn:
         row = get_task_row(conn)
-    return row_to_dict(row)
+    return legacy_task_view(enrich_task(row, conn))
 
 
 @app.get("/api/task/report")
 def get_task_report() -> dict:
     init_db()
     with get_connection() as conn:
-        task = row_to_dict(get_task_row(conn))
+        task = legacy_task_view(enrich_task(get_task_row(conn), conn))
         latest = conn.execute(
             """
             SELECT * FROM device_data
@@ -612,9 +697,9 @@ def get_task_report() -> dict:
     summary["event_count"] = event_count
     return {
         "task": task,
-        "latest": row_to_dict(latest) if latest else {},
+        "latest": normalize_telemetry(latest) if latest else {},
         "summary": summary,
-        "events": [row_to_dict(row) for row in events],
+        "events": [normalize_event(row) for row in events],
     }
 
 
@@ -623,6 +708,7 @@ def get_v1_contracts() -> dict:
     return api_success(
         {
             "task_statuses": TASK_STATUSES,
+            "task_status_labels": TASK_STATUS_LABELS,
             "box_statuses": BOX_STATUSES,
             "move_statuses": MOVE_STATUSES,
             "temperature_statuses": TEMPERATURE_STATUSES,
@@ -639,7 +725,7 @@ def get_v1_task(task_id: str):
         row = get_task_by_id(conn, task_id)
     if not row:
         return api_error(404, 40401, "task not found")
-    return api_success(serialize_task(row))
+    return api_success(enrich_task(row, conn))
 
 
 @app.get("/api/v1/tasks/{task_id}/telemetry/latest")
@@ -705,7 +791,7 @@ def get_v1_alarms(
             (task_id, limit),
         ).fetchall()
     return api_success(
-        {"limit": limit, "items": [row_to_dict(row) for row in rows]}
+        {"limit": limit, "items": [normalize_event(row) for row in rows]}
     )
 
 
@@ -733,10 +819,10 @@ def start_v1_task(task_id: str):
                 rejected_at = NULL, rejection_reason = NULL, updated_at = ?
             WHERE task_id = ?
             """,
-            ("运输中", timestamp, timestamp, task_id),
+            ("in_transit", timestamp, timestamp, task_id),
         )
         updated = get_task_by_id(conn, task_id)
-    return api_success(serialize_task(updated), "task started")
+    return api_success(enrich_task(updated, conn), "task started")
 
 
 @app.post("/api/v1/tasks/{task_id}/sign")
@@ -755,10 +841,10 @@ def sign_v1_task(task_id: str):
             SET status = ?, signed_at = ?, updated_at = ?
             WHERE task_id = ?
             """,
-            ("已签收", timestamp, timestamp, task_id),
+            ("signed", timestamp, timestamp, task_id),
         )
         updated = get_task_by_id(conn, task_id)
-    return api_success(serialize_task(updated), "task signed")
+    return api_success(enrich_task(updated, conn), "task signed")
 
 
 @app.post("/api/v1/tasks/{task_id}/reject")
@@ -782,10 +868,10 @@ def reject_v1_task(task_id: str, data: RejectTaskIn):
                 rejection_reason = ?, updated_at = ?
             WHERE task_id = ?
             """,
-            ("已拒收", timestamp, reason, timestamp, task_id),
+            ("rejected", timestamp, reason, timestamp, task_id),
         )
         updated = get_task_by_id(conn, task_id)
-    return api_success(serialize_task(updated), "task rejected")
+    return api_success(enrich_task(updated, conn), "task rejected")
 
 
 @app.get("/api/v1/tasks/{task_id}/trace-report")
@@ -865,6 +951,7 @@ def dashboard() -> str:
         <div><div class="label">承运人员</div><div id="carrier">--</div></div>
         <div><div class="label">发出时间</div><div id="startedAt">--</div></div>
         <div><div class="label">签收时间</div><div id="signedAt">--</div></div>
+        <div><div class="label">异常事件</div><div id="abnormalCount">--</div></div>
       </div>
       <div class="actions">
         <button onclick="startTask()">发出交接</button>
@@ -928,6 +1015,16 @@ def dashboard() -> str:
   </main>
 
   <script>
+    const STATUS_LABELS = {
+      pending_pack: "待发出",
+      pending_handoff: "待发出",
+      in_transit: "运输中",
+      arrived: "已到达",
+      signed: "已签收",
+      rejected: "已拒收",
+      canceled: "已取消"
+    };
+
     function showValue(id, value, suffix = "") {
       document.getElementById(id).textContent = value === undefined || value === null || value === "" ? "--" : value + suffix;
     }
@@ -953,9 +1050,11 @@ def dashboard() -> str:
       showValue("carrier", task.carrier);
       showValue("startedAt", task.started_at);
       showValue("signedAt", task.signed_at);
+      showValue("abnormalCount", task.abnormal_count);
       const status = document.getElementById("taskStatus");
-      status.textContent = task.status || "--";
-      status.className = task.status === "异常" ? "task-status alert" : "task-status";
+      status.textContent = STATUS_LABELS[task.status] || task.status || "--";
+      const isAlert = task.abnormal_count > 0 || task.status === "rejected";
+      status.className = isAlert ? "task-status alert" : "task-status";
     }
 
     function renderHistory(history) {
