@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, Query
+from fastapi import Body, FastAPI, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -103,20 +103,94 @@ class DeviceDataIn(BaseModel):
     timestamp: Optional[str] = None
 
 
+class LocationIn(BaseModel):
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    accuracy: Optional[float] = None
+
+
+class DeviceTelemetryIn(BaseModel):
+    device_id: str = Field(..., examples=["CLD-001"])
+    task_id: str = Field(..., examples=["TASK-001"])
+    sequence: Optional[int] = None
+    captured_at: Optional[str] = None
+    temperature: float
+    humidity: float
+    battery: Optional[int] = None
+    box_status: str
+    move_status: str
+    temp_status: Optional[str] = None
+    light_raw: int
+    acc_total: Optional[float] = None
+    motion_score: Optional[float] = None
+    location: Optional[LocationIn] = None
+
+
+class DeviceHeartbeatIn(BaseModel):
+    device_id: str = Field(..., examples=["CLD-001"])
+    task_id: Optional[str] = Field(None, examples=["TASK-001"])
+    battery: Optional[int] = None
+    rssi: Optional[int] = None
+    network: Optional[str] = Field(None, max_length=40)
+    timestamp: Optional[str] = None
+
+
 class RejectTaskIn(BaseModel):
     reason: str = Field(..., min_length=1, max_length=200)
 
 
 class RegisterIn(BaseModel):
-    username: str = Field(..., min_length=3, max_length=40)
+    username: Optional[str] = Field(None, min_length=3, max_length=40)
+    phone: Optional[str] = Field(None, min_length=3, max_length=40)
+    name: Optional[str] = Field(None, min_length=1, max_length=80)
+    organization: Optional[str] = Field(None, max_length=120)
     password: str = Field(..., min_length=6, max_length=80)
     role: str = Field(..., examples=["receiver"])
     display_name: Optional[str] = Field(None, max_length=80)
 
 
 class LoginIn(BaseModel):
-    username: str = Field(..., min_length=1, max_length=40)
+    username: Optional[str] = Field(None, min_length=1, max_length=40)
+    phone: Optional[str] = Field(None, min_length=1, max_length=40)
     password: str = Field(..., min_length=1, max_length=80)
+
+
+class CreateTaskIn(BaseModel):
+    sample_name: str = Field(..., min_length=1, max_length=120)
+    batch: Optional[str] = Field(None, max_length=80)
+    receiver: Optional[str] = Field(None, max_length=120)
+    carrier: Optional[str] = Field(None, max_length=120)
+    expected_arrival: Optional[str] = Field(None, max_length=40)
+    device_id: Optional[str] = Field(None, max_length=80)
+    box_id: Optional[str] = Field(None, max_length=80)
+    seal_id: Optional[str] = Field(None, max_length=80)
+    temperature_min: Optional[float] = None
+    temperature_max: Optional[float] = None
+
+
+class UpdateTaskIn(BaseModel):
+    sample_name: Optional[str] = Field(None, min_length=1, max_length=120)
+    batch: Optional[str] = Field(None, max_length=80)
+    receiver: Optional[str] = Field(None, max_length=120)
+    carrier: Optional[str] = Field(None, max_length=120)
+    expected_arrival: Optional[str] = Field(None, max_length=40)
+    device_id: Optional[str] = Field(None, max_length=80)
+    box_id: Optional[str] = Field(None, max_length=80)
+    seal_id: Optional[str] = Field(None, max_length=80)
+    temperature_min: Optional[float] = None
+    temperature_max: Optional[float] = None
+
+
+class AssignTaskIn(BaseModel):
+    carrier_user_id: Optional[int] = None
+    receiver_user_id: Optional[int] = None
+
+
+class PrecheckTaskIn(BaseModel):
+    passed: bool
+    temperature: Optional[float] = None
+    seal_ok: Optional[bool] = None
+    note: Optional[str] = Field(None, max_length=300)
 
 
 def now_iso() -> str:
@@ -212,9 +286,51 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_heartbeat (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                task_id TEXT,
+                battery INTEGER,
+                rssi INTEGER,
+                network TEXT,
+                status TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        ensure_column(conn, "device_data", "sequence", "INTEGER")
+        ensure_column(conn, "device_data", "battery", "INTEGER")
+        ensure_column(conn, "device_data", "lat", "REAL")
+        ensure_column(conn, "device_data", "lng", "REAL")
+        ensure_column(conn, "device_data", "accuracy", "REAL")
         ensure_column(conn, "task_handoff", "device_id", "TEXT")
         ensure_column(conn, "task_handoff", "rejected_at", "TEXT")
         ensure_column(conn, "task_handoff", "rejection_reason", "TEXT")
+        ensure_column(conn, "task_handoff", "arrived_at", "TEXT")
+        ensure_column(conn, "task_handoff", "owner_user_id", "INTEGER")
+        ensure_column(conn, "task_handoff", "carrier_user_id", "INTEGER")
+        ensure_column(conn, "task_handoff", "receiver_user_id", "INTEGER")
+        ensure_column(conn, "task_handoff", "batch", "TEXT")
+        ensure_column(conn, "task_handoff", "expected_arrival", "TEXT")
+        ensure_column(conn, "task_handoff", "box_id", "TEXT")
+        ensure_column(conn, "task_handoff", "seal_id", "TEXT")
+        ensure_column(conn, "task_handoff", "temperature_min", "REAL")
+        ensure_column(conn, "task_handoff", "temperature_max", "REAL")
+        ensure_column(conn, "task_handoff", "precheck_passed", "INTEGER")
+        ensure_column(conn, "task_handoff", "precheck_temperature", "REAL")
+        ensure_column(conn, "task_handoff", "precheck_seal_ok", "INTEGER")
+        ensure_column(conn, "task_handoff", "precheck_note", "TEXT")
+        ensure_column(conn, "task_handoff", "prechecked_at", "TEXT")
+        ensure_column(conn, "task_handoff", "canceled_at", "TEXT")
+        ensure_column(conn, "task_handoff", "cancel_reason", "TEXT")
+        ensure_column(conn, "task_handoff", "idempotency_key", "TEXT")
+        ensure_column(conn, "users", "phone", "TEXT")
+        ensure_column(conn, "users", "name", "TEXT")
+        ensure_column(conn, "users", "organization", "TEXT")
+        ensure_column(conn, "users", "status", "TEXT")
         ensure_demo_task(conn)
         migrate_task_status_column(conn)
 
@@ -388,6 +504,80 @@ def insert_event_logs(
         )
 
 
+def save_device_data(
+    conn: sqlite3.Connection,
+    data: DeviceDataIn,
+    sequence: Optional[int] = None,
+    battery: Optional[int] = None,
+    location: Optional[LocationIn] = None,
+) -> tuple[Optional[sqlite3.Row], Optional[JSONResponse]]:
+    timestamp = data.timestamp or now_iso()
+    created_at = now_iso()
+    event_type = detect_event(data)
+
+    task = conn.execute(
+        "SELECT device_id FROM task_handoff WHERE task_id = ?",
+        (data.task_id,),
+    ).fetchone()
+    if task and task["device_id"] and task["device_id"] != data.device_id:
+        return None, JSONResponse(
+            status_code=409,
+            content={"ok": False, "error": "device does not match task"},
+        )
+
+    cursor = conn.execute(
+        """
+        INSERT INTO device_data (
+            device_id, task_id, temperature, humidity, light_raw,
+            box_status, move_status, temp_status, acc_total, motion_score,
+            event_type, timestamp, created_at, sequence, battery, lat, lng, accuracy
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            data.device_id,
+            data.task_id,
+            data.temperature,
+            data.humidity,
+            data.light_raw,
+            data.box_status,
+            data.move_status,
+            data.temp_status,
+            data.acc_total,
+            data.motion_score,
+            event_type,
+            timestamp,
+            created_at,
+            sequence,
+            battery,
+            location.lat if location else None,
+            location.lng if location else None,
+            location.accuracy if location else None,
+        ),
+    )
+    item_id = cursor.lastrowid
+    insert_event_logs(conn, item_id, data, event_type, timestamp, created_at)
+    row = conn.execute(
+        "SELECT * FROM device_data WHERE id = ?",
+        (item_id,),
+    ).fetchone()
+    return row, None
+
+
+def telemetry_temp_status(payload: DeviceTelemetryIn, task: Optional[sqlite3.Row]) -> str:
+    if payload.temp_status:
+        return payload.temp_status
+    if task:
+        task_data = row_to_dict(task)
+        minimum = task_data.get("temperature_min")
+        maximum = task_data.get("temperature_max")
+        if minimum is not None and payload.temperature < minimum:
+            return "TEMP_ALERT"
+        if maximum is not None and payload.temperature > maximum:
+            return "TEMP_ALERT"
+    return "TEMP_OK"
+
+
 def get_task_row(conn: sqlite3.Connection) -> sqlite3.Row:
     return conn.execute(
         "SELECT * FROM task_handoff WHERE task_id = ?",
@@ -424,6 +614,10 @@ def serialize_user(row: sqlite3.Row) -> dict:
     return {
         "user_id": row["id"],
         "username": row["username"],
+        "phone": row["phone"] or row["username"],
+        "name": row["name"] or row["display_name"] or row["username"],
+        "organization": row["organization"] or "",
+        "status": row["status"] or "active",
         "role": row["role"],
         "display_name": row["display_name"] or row["username"],
     }
@@ -454,19 +648,72 @@ def current_user_from_token(token: Optional[str]) -> Optional[dict]:
     return serialize_user(row) if row else None
 
 
+def require_user(authorization: Optional[str]) -> Optional[dict]:
+    return current_user_from_token(bearer_token(authorization))
+
+
+def generate_task_id(conn: sqlite3.Connection) -> str:
+    today = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d")
+    prefix = f"WD-{today}-"
+    row = conn.execute(
+        """
+        SELECT task_id FROM task_handoff
+        WHERE task_id LIKE ?
+        ORDER BY task_id DESC
+        LIMIT 1
+        """,
+        (f"{prefix}%",),
+    ).fetchone()
+    next_no = 1
+    if row:
+        try:
+            next_no = int(row["task_id"].rsplit("-", 1)[1]) + 1
+        except (IndexError, ValueError):
+            next_no = 1
+    return f"{prefix}{next_no:03d}"
+
+
+def can_view_task(user: Optional[dict], task: dict) -> bool:
+    if not user:
+        return task["task_id"] == DEMO_TASK["task_id"]
+    if user["role"] == "admin":
+        return True
+    if task.get("owner_user_id") == user["user_id"]:
+        return True
+    if task.get("carrier_user_id") == user["user_id"]:
+        return True
+    if task.get("receiver_user_id") == user["user_id"]:
+        return True
+    return False
+
+
+def can_modify_task(user: dict, task: dict) -> bool:
+    return user["role"] == "admin" or task.get("owner_user_id") == user["user_id"]
+
+
 def canonical_task_status(task: dict) -> str:
+    if task.get("canceled_at") or task.get("status") == "canceled":
+        return "canceled"
     if task.get("rejected_at") or task.get("rejection_reason"):
         return "rejected"
     if task.get("signed_at"):
         return "signed"
+    if task.get("arrived_at") or task.get("status") == "arrived":
+        return "arrived"
     if task.get("started_at"):
         return "in_transit"
-    return "pending_pack"
+    if task.get("precheck_passed"):
+        return "pending_handoff"
+    return task.get("status") if task.get("status") in TASK_STATUSES else "pending_pack"
 
 
 def serialize_task(row: sqlite3.Row) -> dict:
     task = row_to_dict(row)
     task["status"] = canonical_task_status(task)
+    if task.get("precheck_passed") is not None:
+        task["precheck_passed"] = bool(task["precheck_passed"])
+    if task.get("precheck_seal_ok") is not None:
+        task["precheck_seal_ok"] = bool(task["precheck_seal_ok"])
     return task
 
 
@@ -474,6 +721,8 @@ def build_handoff_nodes(task: dict) -> list[dict]:
     nodes = []
     if task.get("started_at"):
         nodes.append({"type": "started", "timestamp": task["started_at"]})
+    if task.get("arrived_at"):
+        nodes.append({"type": "arrived", "timestamp": task["arrived_at"]})
     if task.get("signed_at"):
         nodes.append({"type": "signed", "timestamp": task["signed_at"]})
     if task.get("rejected_at"):
@@ -634,51 +883,10 @@ def get_trace_report_data(conn: sqlite3.Connection, task_id: str) -> dict:
 @app.post("/api/device/data")
 def receive_device_data(data: DeviceDataIn):
     init_db()
-    timestamp = data.timestamp or now_iso()
-    created_at = now_iso()
-    event_type = detect_event(data)
-
     with get_connection() as conn:
-        task = conn.execute(
-            "SELECT device_id FROM task_handoff WHERE task_id = ?",
-            (data.task_id,),
-        ).fetchone()
-        if task and task["device_id"] and task["device_id"] != data.device_id:
-            return JSONResponse(
-                status_code=409,
-                content={"ok": False, "error": "device does not match task"},
-            )
-        cursor = conn.execute(
-            """
-            INSERT INTO device_data (
-                device_id, task_id, temperature, humidity, light_raw,
-                box_status, move_status, temp_status, acc_total, motion_score,
-                event_type, timestamp, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                data.device_id,
-                data.task_id,
-                data.temperature,
-                data.humidity,
-                data.light_raw,
-                data.box_status,
-                data.move_status,
-                data.temp_status,
-                data.acc_total,
-                data.motion_score,
-                event_type,
-                timestamp,
-                created_at,
-            ),
-        )
-        item_id = cursor.lastrowid
-        insert_event_logs(conn, item_id, data, event_type, timestamp, created_at)
-        row = conn.execute(
-            "SELECT * FROM device_data WHERE id = ?",
-            (item_id,),
-        ).fetchone()
+        row, error = save_device_data(conn, data)
+        if error:
+            return error
 
     return {"ok": True, "data": row_to_dict(row)}
 
@@ -731,7 +939,8 @@ def start_task() -> dict:
             """
             UPDATE task_handoff
             SET status = ?, started_at = ?, signed_at = NULL,
-                rejected_at = NULL, rejection_reason = NULL, updated_at = ?
+                arrived_at = NULL, rejected_at = NULL,
+                rejection_reason = NULL, updated_at = ?
             WHERE task_id = ?
             """,
             ("in_transit", timestamp, timestamp, DEMO_TASK["task_id"]),
@@ -846,28 +1055,45 @@ def register_user(payload: RegisterIn):
     role = payload.role.strip().lower()
     if role not in AUTH_ROLES:
         return api_error(422, 42202, "invalid role")
+    username = (payload.username or payload.phone or "").strip()
+    if not username:
+        return api_error(422, 42203, "username or phone required")
 
     salt = secrets.token_hex(16)
     password_hash = hash_password(payload.password, salt)
-    display_name = payload.display_name or payload.username
+    display_name = payload.display_name or payload.name or username
     created_at = now_iso()
+    phone = (payload.phone or username).strip()
+    name = (payload.name or display_name).strip()
+    organization = (payload.organization or "").strip()
 
     try:
         with get_connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM users WHERE username = ? OR phone = ?",
+                (username, phone),
+            ).fetchone()
+            if existing:
+                return api_error(409, 40902, "username already exists")
             cursor = conn.execute(
                 """
                 INSERT INTO users (
-                    username, password_hash, salt, role, display_name, created_at
+                    username, password_hash, salt, role, display_name, created_at,
+                    phone, name, organization, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    payload.username,
+                    username,
                     password_hash,
                     salt,
                     role,
                     display_name,
                     created_at,
+                    phone,
+                    name,
+                    organization,
+                    "active",
                 ),
             )
             row = conn.execute(
@@ -883,10 +1109,13 @@ def register_user(payload: RegisterIn):
 @app.post("/api/v1/auth/login")
 def login_user(payload: LoginIn):
     init_db()
+    account = (payload.username or payload.phone or "").strip()
+    if not account:
+        return api_error(422, 42203, "username or phone required")
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM users WHERE username = ?",
-            (payload.username,),
+            "SELECT * FROM users WHERE username = ? OR phone = ?",
+            (account, account),
         ).fetchone()
         if not row:
             return api_error(401, 40101, "invalid username or password")
@@ -950,14 +1179,407 @@ def logout_user(authorization: Optional[str] = Header(None)):
     return api_success({"logged_out": True}, "logout success")
 
 
-@app.get("/api/v1/tasks/{task_id}")
-def get_v1_task(task_id: str):
+@app.post("/api/v1/auth/refresh")
+def refresh_auth_token(authorization: Optional[str] = Header(None)):
+    init_db()
+    old_token = bearer_token(authorization)
+    if not old_token:
+        return api_error(401, 40102, "unauthorized")
+
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT users.*
+            FROM auth_tokens
+            JOIN users ON users.id = auth_tokens.user_id
+            WHERE auth_tokens.token = ?
+            """,
+            (old_token,),
+        ).fetchone()
+        if not row:
+            return api_error(401, 40102, "unauthorized")
+
+        new_token = secrets.token_urlsafe(32)
+        conn.execute("DELETE FROM auth_tokens WHERE token = ?", (old_token,))
+        conn.execute(
+            """
+            INSERT INTO auth_tokens (token, user_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (new_token, row["id"], now_iso()),
+        )
+
+    return api_success(
+        {
+            "token": new_token,
+            "token_type": "bearer",
+            "user": serialize_user(row),
+        },
+        "refresh success",
+    )
+
+
+@app.post("/api/v1/device/telemetry")
+def receive_v1_device_telemetry(payload: DeviceTelemetryIn):
     init_db()
     with get_connection() as conn:
+        task = get_task_by_id(conn, payload.task_id)
+        data = DeviceDataIn(
+            device_id=payload.device_id,
+            task_id=payload.task_id,
+            temperature=payload.temperature,
+            humidity=payload.humidity,
+            light_raw=payload.light_raw,
+            box_status=payload.box_status,
+            move_status=payload.move_status,
+            temp_status=telemetry_temp_status(payload, task),
+            acc_total=payload.acc_total if payload.acc_total is not None else 0.0,
+            motion_score=payload.motion_score if payload.motion_score is not None else 0.0,
+            timestamp=payload.captured_at,
+        )
+        row, error = save_device_data(
+            conn,
+            data,
+            sequence=payload.sequence,
+            battery=payload.battery,
+            location=payload.location,
+        )
+        if error:
+            return api_error(409, 40920, "device does not match task")
+
+    return api_success(
+        {
+            "saved": 1,
+            "items": [normalize_telemetry(row)],
+        },
+        "telemetry saved",
+    )
+
+
+@app.post("/api/v1/device/heartbeat")
+def receive_v1_device_heartbeat(payload: DeviceHeartbeatIn):
+    init_db()
+    timestamp = payload.timestamp or now_iso()
+    created_at = now_iso()
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO device_heartbeat (
+                device_id, task_id, battery, rssi, network,
+                status, timestamp, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.device_id,
+                payload.task_id,
+                payload.battery,
+                payload.rssi,
+                payload.network,
+                "online",
+                timestamp,
+                created_at,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM device_heartbeat WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    return api_success(row_to_dict(row), "heartbeat saved")
+
+
+@app.get("/api/v1/tasks")
+def list_v1_tasks(
+    authorization: Optional[str] = Header(None),
+    status: Optional[str] = Query(default=None),
+    keyword: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM task_handoff ORDER BY updated_at DESC"
+        ).fetchall()
+        tasks = [
+            enrich_task(row, conn)
+            for row in rows
+            if can_view_task(user, serialize_task(row))
+        ]
+
+    if status:
+        tasks = [task for task in tasks if task["status"] == status]
+    if keyword:
+        lowered = keyword.lower()
+        tasks = [
+            task
+            for task in tasks
+            if lowered in task["task_id"].lower()
+            or lowered in task["sample_name"].lower()
+            or lowered in (task.get("batch") or "").lower()
+        ]
+
+    start = (page - 1) * page_size
+    end = start + page_size
+    return api_success(
+        {
+            "items": tasks[start:end],
+            "page": page,
+            "page_size": page_size,
+            "total": len(tasks),
+        }
+    )
+
+
+@app.post("/api/v1/tasks")
+def create_v1_task(
+    payload: CreateTaskIn,
+    authorization: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] not in {"sender", "admin"}:
+        return api_error(403, 40301, "forbidden")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        if idempotency_key:
+            existing = conn.execute(
+                """
+                SELECT * FROM task_handoff
+                WHERE owner_user_id = ? AND idempotency_key = ?
+                """,
+                (user["user_id"], idempotency_key),
+            ).fetchone()
+            if existing:
+                return api_success(enrich_task(existing, conn), "task created")
+
+        task_id = generate_task_id(conn)
+        sender = user["organization"] or user["display_name"]
+        cursor = conn.execute(
+            """
+            INSERT INTO task_handoff (
+                task_id, device_id, sample_name, sender, receiver, carrier,
+                status, started_at, signed_at, updated_at,
+                owner_user_id, batch, expected_arrival, box_id, seal_id,
+                temperature_min, temperature_max, idempotency_key
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                payload.device_id,
+                payload.sample_name,
+                sender,
+                payload.receiver or "",
+                payload.carrier or "",
+                "pending_pack",
+                None,
+                None,
+                timestamp,
+                user["user_id"],
+                payload.batch,
+                payload.expected_arrival,
+                payload.box_id,
+                payload.seal_id,
+                payload.temperature_min,
+                payload.temperature_max,
+                idempotency_key,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM task_handoff WHERE rowid = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    return api_success(enrich_task(row, conn), "task created")
+
+
+@app.get("/api/v1/tasks/{task_id}")
+def get_v1_task(task_id: str, authorization: Optional[str] = Header(None)):
+    init_db()
+    user = require_user(authorization)
+    with get_connection() as conn:
         row = get_task_by_id(conn, task_id)
+        if row and not can_view_task(user, serialize_task(row)):
+            return api_error(404, 40401, "task not found")
     if not row:
         return api_error(404, 40401, "task not found")
     return api_success(enrich_task(row, conn))
+
+
+@app.patch("/api/v1/tasks/{task_id}")
+def update_v1_task(
+    task_id: str,
+    payload: UpdateTaskIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    with get_connection() as conn:
+        row = get_task_by_id(conn, task_id)
+        if not row:
+            return api_error(404, 40401, "task not found")
+        task = serialize_task(row)
+        if not can_modify_task(user, task):
+            return api_error(404, 40401, "task not found")
+        if task["status"] not in {"pending_pack", "pending_handoff"}:
+            return task_state_conflict()
+
+        allowed = {
+            "sample_name",
+            "batch",
+            "receiver",
+            "carrier",
+            "expected_arrival",
+            "device_id",
+            "box_id",
+            "seal_id",
+            "temperature_min",
+            "temperature_max",
+        }
+        changes = payload.model_dump(exclude_unset=True)
+        assignments = []
+        values = []
+        for key, value in changes.items():
+            if key in allowed:
+                assignments.append(f"{key} = ?")
+                values.append(value)
+        if assignments:
+            assignments.append("updated_at = ?")
+            values.append(now_iso())
+            values.append(task_id)
+            conn.execute(
+                f"UPDATE task_handoff SET {', '.join(assignments)} WHERE task_id = ?",
+                values,
+            )
+        updated = get_task_by_id(conn, task_id)
+    return api_success(enrich_task(updated, conn), "task updated")
+
+
+@app.post("/api/v1/tasks/{task_id}/assign")
+def assign_v1_task(
+    task_id: str,
+    payload: AssignTaskIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    with get_connection() as conn:
+        row = get_task_by_id(conn, task_id)
+        if not row:
+            return api_error(404, 40401, "task not found")
+        task = serialize_task(row)
+        if not can_modify_task(user, task):
+            return api_error(404, 40401, "task not found")
+        if task["status"] not in {"pending_pack", "pending_handoff"}:
+            return task_state_conflict()
+
+        conn.execute(
+            """
+            UPDATE task_handoff
+            SET carrier_user_id = ?, receiver_user_id = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (
+                payload.carrier_user_id,
+                payload.receiver_user_id,
+                now_iso(),
+                task_id,
+            ),
+        )
+        updated = get_task_by_id(conn, task_id)
+    return api_success(enrich_task(updated, conn), "task assigned")
+
+
+@app.post("/api/v1/tasks/{task_id}/cancel")
+def cancel_v1_task(
+    task_id: str,
+    authorization: Optional[str] = Header(None),
+    reason: Optional[str] = Body(default=None, embed=True),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = get_task_by_id(conn, task_id)
+        if not row:
+            return api_error(404, 40401, "task not found")
+        task = serialize_task(row)
+        if not can_modify_task(user, task):
+            return api_error(404, 40401, "task not found")
+        if task["status"] in {"in_transit", "arrived", "signed", "rejected", "canceled"}:
+            return task_state_conflict()
+        conn.execute(
+            """
+            UPDATE task_handoff
+            SET status = ?, canceled_at = ?, cancel_reason = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            ("canceled", timestamp, reason, timestamp, task_id),
+        )
+        updated = get_task_by_id(conn, task_id)
+    return api_success(enrich_task(updated, conn), "task canceled")
+
+
+@app.post("/api/v1/tasks/{task_id}/precheck")
+def precheck_v1_task(
+    task_id: str,
+    payload: PrecheckTaskIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = get_task_by_id(conn, task_id)
+        if not row:
+            return api_error(404, 40401, "task not found")
+        task = serialize_task(row)
+        if not can_modify_task(user, task):
+            return api_error(404, 40401, "task not found")
+        if task["status"] != "pending_pack":
+            return task_state_conflict()
+        conn.execute(
+            """
+            UPDATE task_handoff
+            SET status = ?, precheck_passed = ?, precheck_temperature = ?,
+                precheck_seal_ok = ?, precheck_note = ?, prechecked_at = ?,
+                updated_at = ?
+            WHERE task_id = ?
+            """,
+            (
+                "pending_handoff" if payload.passed else "pending_pack",
+                1 if payload.passed else 0,
+                payload.temperature,
+                None if payload.seal_ok is None else int(payload.seal_ok),
+                payload.note,
+                timestamp,
+                timestamp,
+                task_id,
+            ),
+        )
+        updated = get_task_by_id(conn, task_id)
+    return api_success(enrich_task(updated, conn), "task prechecked")
 
 
 @app.get("/api/v1/tasks/{task_id}/telemetry/latest")
@@ -1048,13 +1670,36 @@ def start_v1_task(task_id: str):
             """
             UPDATE task_handoff
             SET status = ?, started_at = ?, signed_at = NULL,
-                rejected_at = NULL, rejection_reason = NULL, updated_at = ?
+                arrived_at = NULL, rejected_at = NULL,
+                rejection_reason = NULL, updated_at = ?
             WHERE task_id = ?
             """,
             ("in_transit", timestamp, timestamp, task_id),
         )
         updated = get_task_by_id(conn, task_id)
     return api_success(enrich_task(updated, conn), "task started")
+
+
+@app.post("/api/v1/tasks/{task_id}/arrive")
+def arrive_v1_task(task_id: str):
+    init_db()
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = get_task_by_id(conn, task_id)
+        if not row:
+            return api_error(404, 40401, "task not found")
+        if canonical_task_status(row_to_dict(row)) != "in_transit":
+            return task_state_conflict()
+        conn.execute(
+            """
+            UPDATE task_handoff
+            SET status = ?, arrived_at = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            ("arrived", timestamp, timestamp, task_id),
+        )
+        updated = get_task_by_id(conn, task_id)
+    return api_success(enrich_task(updated, conn), "task arrived")
 
 
 @app.post("/api/v1/tasks/{task_id}/sign")

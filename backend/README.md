@@ -119,19 +119,124 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 - `POST /api/device/data`：上传冷链监测数据。
 
-Web 管理端和微信小程序统一使用 `/api/v1`：
+Web 管理端和微信小程序统一使用 `/api/v1`。当前后端 MVP 已支持：
+
+### 账号接口
+
+- `POST /api/v1/auth/register`：注册用户，支持 `name、phone、organization、role、password`。
+- `POST /api/v1/auth/login`：登录，返回 Bearer Token。
+- `GET /api/v1/auth/me`：获取当前用户。
+- `GET /api/v1/auth/permissions`：获取当前角色权限。
+- `POST /api/v1/auth/refresh`：刷新 Token，旧 Token 会失效。
+- `POST /api/v1/auth/logout`：退出登录。
+
+### 运单接口
+
+- `GET /api/v1/tasks`：按当前登录用户权限查询运单列表。
+- `POST /api/v1/tasks`：创建正式运单，后端自动生成 `WD-YYYYMMDD-001` 格式运单号。
+- `GET /api/v1/tasks/{task_id}`：任务详情。
+- `PATCH /api/v1/tasks/{task_id}`：编辑未发出的运单。
+- `POST /api/v1/tasks/{task_id}/assign`：指派承运方和接收方。
+- `POST /api/v1/tasks/{task_id}/precheck`：保存装箱预检，通过后进入 `pending_handoff`。
+- `POST /api/v1/tasks/{task_id}/cancel`：取消未发出的运单。
+- `POST /api/v1/tasks/{task_id}/start`：发出交接，进入运输中。
+- `POST /api/v1/tasks/{task_id}/arrive`：到达接收点，进入已到达。
+- `POST /api/v1/tasks/{task_id}/sign`：签收。
+- `POST /api/v1/tasks/{task_id}/reject`：拒收。
+
+### 设备与监测接口
 
 - `GET /api/v1/meta/contracts`：状态和字段约定。
 - `GET /api/v1/tasks/TASK-001`：任务详情。
 - `GET /api/v1/tasks/TASK-001/telemetry/latest`：最新监测数据。
 - `GET /api/v1/tasks/TASK-001/telemetry/history?limit=100`：监测历史。
 - `GET /api/v1/tasks/TASK-001/alarms?limit=100`：异常列表。
-- `POST /api/v1/tasks/TASK-001/start`：发出交接。
-- `POST /api/v1/tasks/TASK-001/sign`：签收。
-- `POST /api/v1/tasks/TASK-001/reject`：拒收。
 - `GET /api/v1/tasks/TASK-001/trace-report`：追溯报告。
+- `POST /api/v1/device/telemetry`：正式设备遥测上传接口，支持电量和位置字段。
+- `POST /api/v1/device/heartbeat`：设备心跳接口，用于表示设备在线。
 
 旧版 `/api/device/*`、`/api/task/*` 和首页看板均继续保留。
+
+当前 MVP 暂不实现动态二维码、人脸识别、PDF 正式报告、文件上传和设备 HMAC 签名。这些属于下一阶段增强功能。
+
+## MVP 接口示例
+
+注册发货方：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "发货方演示",
+    "phone": "13800000001",
+    "organization": "高校实验室",
+    "role": "sender",
+    "password": "password123"
+  }'
+```
+
+登录并获取 Token：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"13800000001","password":"password123"}'
+```
+
+创建运单时需要把登录返回的 Token 放到 `Authorization`：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/tasks" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer 这里替换成登录返回的token" \
+  -H "Idempotency-Key: demo-create-task-001" \
+  -d '{
+    "sample_name": "血液样本批次 A",
+    "batch": "B-20260722-01",
+    "receiver": "市医院检验科",
+    "carrier": "迅达冷链",
+    "expected_arrival": "2026-07-23T10:00:00+08:00",
+    "device_id": "CLD-001",
+    "box_id": "BOX-A12",
+    "seal_id": "SEAL-8891",
+    "temperature_min": 2.0,
+    "temperature_max": 8.0
+  }'
+```
+
+正式设备遥测上传示例：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/device/telemetry" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_id": "CLD-001",
+    "task_id": "TASK-001",
+    "sequence": 1001,
+    "captured_at": "2026-07-22T18:50:00+08:00",
+    "temperature": 6.2,
+    "humidity": 62.5,
+    "battery": 86,
+    "box_status": "BOX_CLOSED",
+    "move_status": "STABLE",
+    "light_raw": 120,
+    "location": {"lat": 30.123, "lng": 120.456, "accuracy": 20}
+  }'
+```
+
+设备心跳示例：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/device/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_id": "CLD-001",
+    "task_id": "TASK-001",
+    "battery": 83,
+    "rssi": -71,
+    "network": "4G"
+  }'
+```
 
 ## 测试上传
 

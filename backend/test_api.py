@@ -174,12 +174,11 @@ def test_v1_auth_register_login_me_and_logout():
 
     assert register.status_code == 200
     registered_user = register.json()["data"]["user"]
-    assert registered_user == {
-        "user_id": 1,
-        "username": "receiver_demo",
-        "role": "receiver",
-        "display_name": "接收方演示账号",
-    }
+    assert registered_user["user_id"] == 1
+    assert registered_user["username"] == "receiver_demo"
+    assert registered_user["phone"] == "receiver_demo"
+    assert registered_user["role"] == "receiver"
+    assert registered_user["display_name"] == "接收方演示账号"
     assert "password" not in register.text
 
     duplicate = client.post(
@@ -237,6 +236,199 @@ def test_v1_auth_register_login_me_and_logout():
         headers={"Authorization": f"Bearer {login_data['token']}"},
     )
     assert expired_me.status_code == 401
+
+
+def test_v1_auth_refresh_rotates_token():
+    client.post(
+        "/api/v1/auth/register",
+        json={
+            "phone": "receiver_refresh",
+            "name": "刷新测试接收方",
+            "organization": "市医院检验科",
+            "password": "receiver123",
+            "role": "receiver",
+        },
+    )
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"phone": "receiver_refresh", "password": "receiver123"},
+    )
+    assert login.status_code == 200
+    old_token = login.json()["data"]["token"]
+
+    refresh = client.post(
+        "/api/v1/auth/refresh",
+        headers={"Authorization": f"Bearer {old_token}"},
+    )
+
+    assert refresh.status_code == 200
+    new_token = refresh.json()["data"]["token"]
+    assert new_token
+    assert new_token != old_token
+
+    old_me = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {old_token}"},
+    )
+    assert old_me.status_code == 401
+
+    new_me = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {new_token}"},
+    )
+    assert new_me.status_code == 200
+    assert new_me.json()["data"]["phone"] == "receiver_refresh"
+
+
+def register_and_login(username: str, role: str, organization: str = "测试单位"):
+    client.post(
+        "/api/v1/auth/register",
+        json={
+            "name": username,
+            "phone": username,
+            "organization": organization,
+            "role": role,
+            "password": "password123",
+        },
+    )
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"phone": username, "password": "password123"},
+    )
+    assert login.status_code == 200
+    return login.json()["data"]["token"], login.json()["data"]["user"]
+
+
+def test_v1_task_list_is_empty_for_new_sender_and_can_create_task():
+    token, user = register_and_login("sender_13800000001", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    empty_list = client.get("/api/v1/tasks", headers=headers)
+    assert empty_list.status_code == 200
+    assert empty_list.json()["data"]["items"] == []
+
+    created = client.post(
+        "/api/v1/tasks",
+        headers={**headers, "Idempotency-Key": "create-task-001"},
+        json={
+            "sample_name": "血液样本批次 A",
+            "batch": "B-20260722-01",
+            "receiver": "市医院检验科",
+            "carrier": "迅达冷链",
+            "expected_arrival": "2026-07-23T10:00:00+08:00",
+            "device_id": "CLD-NEW-001",
+            "box_id": "BOX-A12",
+            "seal_id": "SEAL-8891",
+            "temperature_min": 2.0,
+            "temperature_max": 8.0,
+        },
+    )
+
+    assert created.status_code == 200
+    task = created.json()["data"]
+    assert task["task_id"].startswith("WD-")
+    assert task["sample_name"] == "血液样本批次 A"
+    assert task["sender"] == user["organization"]
+    assert task["status"] == "pending_pack"
+    assert task["owner_user_id"] == user["user_id"]
+
+    repeated = client.post(
+        "/api/v1/tasks",
+        headers={**headers, "Idempotency-Key": "create-task-001"},
+        json={
+            "sample_name": "不应重复创建",
+            "batch": "B-REPEAT",
+        },
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["task_id"] == task["task_id"]
+
+    task_list = client.get("/api/v1/tasks", headers=headers)
+    assert task_list.status_code == 200
+    assert [item["task_id"] for item in task_list.json()["data"]["items"]] == [
+        task["task_id"]
+    ]
+
+
+def test_v1_task_permission_assign_cancel_and_precheck():
+    sender_token, _ = register_and_login("sender_13800000002", "sender", "高校实验室")
+    other_token, _ = register_and_login("sender_13800000003", "sender", "其他实验室")
+    carrier_token, carrier = register_and_login("carrier_13800000004", "carrier", "迅达冷链")
+    receiver_token, receiver = register_and_login(
+        "receiver_13800000005", "receiver", "市医院检验科"
+    )
+    sender_headers = {"Authorization": f"Bearer {sender_token}"}
+
+    created = client.post(
+        "/api/v1/tasks",
+        headers=sender_headers,
+        json={
+            "sample_name": "血液样本批次 B",
+            "batch": "B-20260722-02",
+            "device_id": "CLD-NEW-002",
+            "temperature_min": 2.0,
+            "temperature_max": 8.0,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+
+    forbidden = client.get(
+        f"/api/v1/tasks/{task_id}",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert forbidden.status_code == 404
+
+    patched = client.patch(
+        f"/api/v1/tasks/{task_id}",
+        headers=sender_headers,
+        json={"sample_name": "血液样本批次 B-修改", "box_id": "BOX-B01"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["data"]["sample_name"] == "血液样本批次 B-修改"
+    assert patched.json()["data"]["box_id"] == "BOX-B01"
+
+    assigned = client.post(
+        f"/api/v1/tasks/{task_id}/assign",
+        headers=sender_headers,
+        json={
+            "carrier_user_id": carrier["user_id"],
+            "receiver_user_id": receiver["user_id"],
+        },
+    )
+    assert assigned.status_code == 200
+    assert assigned.json()["data"]["carrier_user_id"] == carrier["user_id"]
+    assert assigned.json()["data"]["receiver_user_id"] == receiver["user_id"]
+
+    carrier_list = client.get(
+        "/api/v1/tasks",
+        headers={"Authorization": f"Bearer {carrier_token}"},
+    )
+    assert [item["task_id"] for item in carrier_list.json()["data"]["items"]] == [
+        task_id
+    ]
+
+    receiver_detail = client.get(
+        f"/api/v1/tasks/{task_id}",
+        headers={"Authorization": f"Bearer {receiver_token}"},
+    )
+    assert receiver_detail.status_code == 200
+
+    prechecked = client.post(
+        f"/api/v1/tasks/{task_id}/precheck",
+        headers=sender_headers,
+        json={"passed": True, "temperature": 4.5, "seal_ok": True, "note": "预检通过"},
+    )
+    assert prechecked.status_code == 200
+    assert prechecked.json()["data"]["status"] == "pending_handoff"
+    assert prechecked.json()["data"]["precheck_passed"] is True
+
+    cancel_after_precheck = client.post(
+        f"/api/v1/tasks/{task_id}/cancel",
+        headers=sender_headers,
+    )
+    assert cancel_after_precheck.status_code == 200
+    assert cancel_after_precheck.json()["data"]["status"] == "canceled"
 
 
 def test_v1_task_identifies_assigned_device():
@@ -353,6 +545,24 @@ def test_v1_handoff_state_machine_supports_sign():
     assert repeated_sign.status_code == 409
 
 
+def test_v1_handoff_state_machine_supports_arrive_before_sign():
+    premature_arrive = client.post("/api/v1/tasks/TASK-001/arrive")
+    assert premature_arrive.status_code == 409
+
+    started = client.post("/api/v1/tasks/TASK-001/start")
+    assert started.status_code == 200
+
+    arrived = client.post("/api/v1/tasks/TASK-001/arrive")
+    assert arrived.status_code == 200
+    arrived_data = arrived.json()["data"]
+    assert arrived_data["status"] == "arrived"
+    assert arrived_data["arrived_at"]
+
+    signed = client.post("/api/v1/tasks/TASK-001/sign")
+    assert signed.status_code == 200
+    assert signed.json()["data"]["status"] == "signed"
+
+
 def test_v1_handoff_state_machine_supports_reject():
     assert client.post("/api/v1/tasks/TASK-001/start").status_code == 200
     rejected = client.post(
@@ -423,3 +633,56 @@ def test_v1_trace_report_includes_handoff_nodes():
     nodes = response.json()["data"]["handoff_nodes"]
     assert [node["type"] for node in nodes] == ["started", "signed"]
     assert all(node["timestamp"] for node in nodes)
+
+
+def test_v1_device_telemetry_accepts_official_upload_format():
+    payload = {
+        "device_id": "CLD-001",
+        "task_id": "TASK-001",
+        "sequence": 1001,
+        "captured_at": "2026-07-22T18:50:00+08:00",
+        "temperature": 6.2,
+        "humidity": 62.5,
+        "battery": 86,
+        "box_status": "BOX_CLOSED",
+        "move_status": "STABLE",
+        "light_raw": 120,
+        "location": {"lat": 30.123, "lng": 120.456, "accuracy": 20},
+    }
+
+    response = client.post("/api/v1/device/telemetry", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["code"] == 0
+    assert body["data"]["saved"] == 1
+    assert body["data"]["items"][0]["task_id"] == "TASK-001"
+    assert body["data"]["items"][0]["battery"] == 86
+    assert body["data"]["items"][0]["lat"] == 30.123
+
+    latest = client.get("/api/v1/tasks/TASK-001/telemetry/latest")
+    assert latest.status_code == 200
+    assert latest.json()["data"]["temperature"] == 6.2
+    assert latest.json()["data"]["timestamp"] == "2026-07-22T18:50:00+08:00"
+
+
+def test_v1_device_heartbeat_records_online_status():
+    response = client.post(
+        "/api/v1/device/heartbeat",
+        json={
+            "device_id": "CLD-001",
+            "task_id": "TASK-001",
+            "battery": 83,
+            "rssi": -71,
+            "network": "4G",
+            "timestamp": "2026-07-22T18:51:00+08:00",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["device_id"] == "CLD-001"
+    assert data["task_id"] == "TASK-001"
+    assert data["status"] == "online"
+    assert data["battery"] == 83
+    assert data["network"] == "4G"
