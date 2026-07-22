@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -59,6 +61,8 @@ EVENT_LEVELS = {
     "TEMP_ALERT": "medium",
     "BOX_OPEN": "medium",
     "MILD": "low",
+    "LOW_BATTERY": "medium",
+    "DEVICE_OFFLINE": "high",
 }
 
 EVENT_DISPLAY_LABELS = {
@@ -69,7 +73,12 @@ EVENT_DISPLAY_LABELS = {
     "IMPACT": "疑似碰撞",
     "FREE_FALL": "疑似跌落",
     "TEMP_ALERT": "温度异常",
+    "LOW_BATTERY": "低电量",
+    "DEVICE_OFFLINE": "设备离线",
 }
+
+LOW_BATTERY_THRESHOLD = 20
+DEVICE_OFFLINE_SECONDS = 300
 
 AUTH_ROLES = ["admin", "sender", "carrier", "receiver"]
 ROLE_PERMISSIONS = {
@@ -139,6 +148,7 @@ class RegisterDeviceIn(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=80)
     device_name: Optional[str] = Field(None, max_length=120)
     model: Optional[str] = Field(None, max_length=120)
+    device_secret: Optional[str] = Field(None, min_length=6, max_length=120)
 
 
 class BindDeviceIn(BaseModel):
@@ -174,6 +184,22 @@ class VerifyQrTokenIn(BaseModel):
 
 class UpdateUserStatusIn(BaseModel):
     status: str = Field(..., examples=["active"])
+
+
+class FaceEnrollIn(BaseModel):
+    template_id: str = Field(..., min_length=1, max_length=160)
+    consent: bool
+    quality_score: Optional[float] = Field(None, ge=0, le=1)
+
+
+class FaceVerifyIn(BaseModel):
+    handoff_id: str = Field(..., min_length=1, max_length=80)
+    qr_token: Optional[str] = Field(None, max_length=160)
+    capture_file_id: Optional[str] = Field(None, max_length=80)
+    liveness_token: Optional[str] = Field(None, max_length=160)
+    liveness_passed: bool = False
+    similarity_score: float = Field(..., ge=0, le=1)
+    location: Optional[LocationIn] = None
 
 
 class CreateFileIn(BaseModel):
@@ -248,6 +274,10 @@ class PrecheckTaskIn(BaseModel):
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def normalize_query_time(value: Optional[str]) -> Optional[str]:
+    return value.replace(" ", "+") if value else value
 
 
 def get_connection() -> sqlite3.Connection:
@@ -472,6 +502,18 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS device_nonces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(device_id, nonce)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS task_status_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -480,6 +522,67 @@ def init_db() -> None:
                 reason TEXT,
                 actor_user_id INTEGER,
                 changed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE,
+                template_id TEXT NOT NULL,
+                consent_at TEXT NOT NULL,
+                quality_score REAL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_verifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                verification_id TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                handoff_id TEXT NOT NULL,
+                qr_token TEXT,
+                capture_file_id TEXT,
+                liveness_token TEXT,
+                liveness_passed INTEGER NOT NULL,
+                similarity_score REAL NOT NULL,
+                threshold REAL NOT NULL,
+                verified INTEGER NOT NULL,
+                manual_review_required INTEGER NOT NULL,
+                location_lat REAL,
+                location_lng REAL,
+                location_accuracy REAL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                verification_id TEXT NOT NULL,
+                reviewer_user_id INTEGER,
+                status TEXT NOT NULL,
+                decision_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(scope, idempotency_key)
             )
             """
         )
@@ -517,6 +620,7 @@ def init_db() -> None:
         ensure_column(conn, "users", "name", "TEXT")
         ensure_column(conn, "users", "organization", "TEXT")
         ensure_column(conn, "users", "status", "TEXT")
+        ensure_column(conn, "devices", "device_secret_hash", "TEXT")
         ensure_demo_task(conn)
         migrate_task_status_column(conn)
 
@@ -700,6 +804,48 @@ def insert_event_logs(
             )
 
 
+def insert_alarm_event(
+    conn: sqlite3.Connection,
+    data_id: Optional[int],
+    task_id: str,
+    device_id: str,
+    event_type: str,
+    event_name: str,
+    event_detail: str,
+    timestamp: str,
+    created_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO event_log (
+            data_id, task_id, device_id, event_type, event_name,
+            event_detail, timestamp, created_at, alarm_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            data_id,
+            task_id,
+            device_id,
+            event_type,
+            event_name,
+            event_detail,
+            timestamp,
+            created_at,
+            "new",
+        ),
+    )
+    for user_id in task_user_ids(conn, task_id):
+        create_notification(
+            conn,
+            user_id=user_id,
+            title="冷链异常告警",
+            message=f"{event_name}：{event_detail}",
+            category="alarm",
+            task_id=task_id,
+        )
+
+
 def save_device_data(
     conn: sqlite3.Connection,
     data: DeviceDataIn,
@@ -753,6 +899,18 @@ def save_device_data(
     )
     item_id = cursor.lastrowid
     insert_event_logs(conn, item_id, data, event_type, timestamp, created_at)
+    if battery is not None and battery < LOW_BATTERY_THRESHOLD:
+        insert_alarm_event(
+            conn,
+            item_id,
+            data.task_id,
+            data.device_id,
+            "LOW_BATTERY",
+            "低电量",
+            f"设备电量低于 {LOW_BATTERY_THRESHOLD}%，当前电量 {battery}%",
+            timestamp,
+            created_at,
+        )
     row = conn.execute(
         "SELECT * FROM device_data WHERE id = ?",
         (item_id,),
@@ -792,6 +950,61 @@ def update_device_seen(
             """,
             (device_id, "online", task_id, battery, seen_at, seen_at, seen_at),
         )
+
+
+def verify_device_signature(
+    conn: sqlite3.Connection,
+    payload: BaseModel,
+    payload_device_id: str,
+    x_device_id: Optional[str],
+    x_timestamp: Optional[str],
+    x_nonce: Optional[str],
+    x_signature: Optional[str],
+) -> Optional[JSONResponse]:
+    device = conn.execute(
+        "SELECT * FROM devices WHERE device_id = ?",
+        (payload_device_id,),
+    ).fetchone()
+    if not device or not device["device_secret_hash"]:
+        return None
+    if not all([x_device_id, x_timestamp, x_nonce, x_signature]):
+        return api_error(401, 40120, "device signature required")
+    if x_device_id != payload_device_id:
+        return api_error(401, 40121, "device id mismatch")
+    try:
+        signed_at = datetime.fromisoformat(x_timestamp)
+    except ValueError:
+        return api_error(401, 40122, "invalid device timestamp")
+    now = datetime.now(timezone.utc).astimezone()
+    if abs((now - signed_at).total_seconds()) > 300:
+        return api_error(401, 40123, "device timestamp expired")
+
+    nonce_row = conn.execute(
+        "SELECT id FROM device_nonces WHERE device_id = ? AND nonce = ?",
+        (payload_device_id, x_nonce),
+    ).fetchone()
+    if nonce_row:
+        return api_error(409, 40940, "device nonce replay")
+
+    # MVP 签名验证使用登记时的明文密钥不可恢复，因此存储的是密钥摘要；
+    # 这里用客户端约定：签名密钥明文的 SHA-256 摘要作为 HMAC key。
+    expected = device_signature(
+        device["device_secret_hash"],
+        payload_device_id,
+        x_timestamp,
+        x_nonce,
+        payload,
+    )
+    if not hmac.compare_digest(expected, x_signature):
+        return api_error(401, 40124, "invalid device signature")
+    conn.execute(
+        """
+        INSERT INTO device_nonces (device_id, nonce, timestamp, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (payload_device_id, x_nonce, x_timestamp, now_iso()),
+    )
+    return None
 
 
 def telemetry_temp_status(payload: DeviceTelemetryIn, task: Optional[sqlite3.Row]) -> str:
@@ -836,12 +1049,103 @@ def api_error(status_code: int, code: int, message: str) -> JSONResponse:
     )
 
 
+def get_idempotent_result(
+    conn: sqlite3.Connection,
+    scope: str,
+    idempotency_key: Optional[str],
+) -> Optional[dict]:
+    if not idempotency_key:
+        return None
+    row = conn.execute(
+        """
+        SELECT response_json FROM idempotency_records
+        WHERE scope = ? AND idempotency_key = ?
+        """,
+        (scope, idempotency_key),
+    ).fetchone()
+    return json.loads(row["response_json"]) if row else None
+
+
+def save_idempotent_result(
+    conn: sqlite3.Connection,
+    scope: str,
+    idempotency_key: Optional[str],
+    data: dict,
+    message: str,
+) -> None:
+    if not idempotency_key:
+        return
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO idempotency_records (
+            scope, idempotency_key, response_json, created_at
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            scope,
+            idempotency_key,
+            json.dumps({"data": data, "message": message}, ensure_ascii=False),
+            now_iso(),
+        ),
+    )
+
+
 def get_user_row(conn: sqlite3.Connection, user_id: int) -> Optional[sqlite3.Row]:
     return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
 
 def serialize_device(row: sqlite3.Row) -> dict:
-    return row_to_dict(row)
+    item = row_to_dict(row)
+    last_seen_at = item.get("last_seen_at")
+    if last_seen_at and item.get("status") in {"online", "bound"}:
+        try:
+            last_seen = datetime.fromisoformat(last_seen_at)
+            now = datetime.now(timezone.utc).astimezone()
+            if (now - last_seen).total_seconds() > DEVICE_OFFLINE_SECONDS:
+                item["status"] = "offline"
+        except ValueError:
+            pass
+    return item
+
+
+def ensure_task_offline_alarm(conn: sqlite3.Connection, task: sqlite3.Row) -> None:
+    task_data = serialize_task(task)
+    device_id = task_data.get("device_id")
+    if not device_id:
+        return
+    device = conn.execute(
+        "SELECT * FROM devices WHERE device_id = ?",
+        (device_id,),
+    ).fetchone()
+    if not device:
+        return
+    device_data = serialize_device(device)
+    if device_data.get("status") != "offline":
+        return
+    existing = conn.execute(
+        """
+        SELECT id FROM event_log
+        WHERE task_id = ? AND device_id = ? AND event_type = ?
+          AND COALESCE(alarm_status, 'new') != ?
+        LIMIT 1
+        """,
+        (task_data["task_id"], device_id, "DEVICE_OFFLINE", "resolved"),
+    ).fetchone()
+    if existing:
+        return
+    timestamp = now_iso()
+    insert_alarm_event(
+        conn,
+        None,
+        task_data["task_id"],
+        device_id,
+        "DEVICE_OFFLINE",
+        "设备离线",
+        f"设备超过 {DEVICE_OFFLINE_SECONDS // 60} 分钟未上传心跳或遥测",
+        timestamp,
+        timestamp,
+    )
 
 
 def serialize_binding(row: sqlite3.Row) -> dict:
@@ -872,6 +1176,26 @@ def serialize_notification(row: sqlite3.Row) -> dict:
     item = row_to_dict(row)
     item["is_read"] = bool(item["is_read"])
     return item
+
+
+def serialize_face_profile(row: Optional[sqlite3.Row]) -> dict:
+    if not row:
+        return {"has_profile": False}
+    item = row_to_dict(row)
+    item["has_profile"] = item["status"] == "active"
+    return item
+
+
+def serialize_face_verification(row: sqlite3.Row) -> dict:
+    item = row_to_dict(row)
+    item["liveness_passed"] = bool(item["liveness_passed"])
+    item["verified"] = bool(item["verified"])
+    item["manual_review_required"] = bool(item["manual_review_required"])
+    return item
+
+
+def serialize_face_review(row: sqlite3.Row) -> dict:
+    return row_to_dict(row)
 
 
 def serialize_status_history(row: sqlite3.Row) -> dict:
@@ -963,8 +1287,30 @@ def generate_file_id() -> str:
     return f"FILE-{secrets.token_hex(6).upper()}"
 
 
+def generate_verification_id() -> str:
+    return f"FV-{secrets.token_hex(6).upper()}"
+
+
 def hash_token_value(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def hash_device_secret(secret: str) -> str:
+    return hash_token_value(secret)
+
+
+def canonical_body_hash(payload: BaseModel) -> str:
+    body = json.dumps(
+        payload.model_dump(exclude_none=True),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def device_signature(secret: str, device_id: str, timestamp: str, nonce: str, payload: BaseModel) -> str:
+    message = f"{device_id}.{timestamp}.{nonce}.{canonical_body_hash(payload)}"
+    return hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def hash_qr_token(token: str) -> str:
@@ -1217,6 +1563,10 @@ def normalize_event(row: sqlite3.Row) -> dict:
     item["event_id"] = item["id"]
     item["description"] = item["event_detail"]
     item["event_level"] = event_level(item["event_type"])
+    item["event_display"] = EVENT_DISPLAY_LABELS.get(
+        item["event_type"],
+        item["event_name"],
+    )
     item["alarm_status"] = item.get("alarm_status") or "new"
     return item
 
@@ -1731,9 +2081,26 @@ def refresh_auth_token(authorization: Optional[str] = Header(None)):
 
 
 @app.post("/api/v1/device/telemetry")
-def receive_v1_device_telemetry(payload: DeviceTelemetryIn):
+def receive_v1_device_telemetry(
+    payload: DeviceTelemetryIn,
+    x_device_id: Optional[str] = Header(None),
+    x_timestamp: Optional[str] = Header(None),
+    x_nonce: Optional[str] = Header(None),
+    x_signature: Optional[str] = Header(None),
+):
     init_db()
     with get_connection() as conn:
+        signature_error = verify_device_signature(
+            conn,
+            payload,
+            payload.device_id,
+            x_device_id,
+            x_timestamp,
+            x_nonce,
+            x_signature,
+        )
+        if signature_error:
+            return signature_error
         task = get_task_by_id(conn, payload.task_id)
         if payload.sequence is not None:
             existing = conn.execute(
@@ -1799,11 +2166,28 @@ def receive_v1_device_telemetry(payload: DeviceTelemetryIn):
 
 
 @app.post("/api/v1/device/heartbeat")
-def receive_v1_device_heartbeat(payload: DeviceHeartbeatIn):
+def receive_v1_device_heartbeat(
+    payload: DeviceHeartbeatIn,
+    x_device_id: Optional[str] = Header(None),
+    x_timestamp: Optional[str] = Header(None),
+    x_nonce: Optional[str] = Header(None),
+    x_signature: Optional[str] = Header(None),
+):
     init_db()
     timestamp = payload.timestamp or now_iso()
     created_at = now_iso()
     with get_connection() as conn:
+        signature_error = verify_device_signature(
+            conn,
+            payload,
+            payload.device_id,
+            x_device_id,
+            x_timestamp,
+            x_nonce,
+            x_signature,
+        )
+        if signature_error:
+            return signature_error
         cursor = conn.execute(
             """
             INSERT INTO device_heartbeat (
@@ -1856,12 +2240,13 @@ def register_v1_device(
             """
             INSERT INTO devices (
                 device_id, device_name, model, status, current_task_id,
-                battery, last_seen_at, created_at, updated_at
+                battery, last_seen_at, created_at, updated_at, device_secret_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
                 device_name = excluded.device_name,
                 model = excluded.model,
+                device_secret_hash = COALESCE(excluded.device_secret_hash, devices.device_secret_hash),
                 updated_at = excluded.updated_at
             """,
             (
@@ -1874,6 +2259,7 @@ def register_v1_device(
                 None,
                 timestamp,
                 timestamp,
+                hash_device_secret(payload.device_secret) if payload.device_secret else None,
             ),
         )
         row = conn.execute(
@@ -2072,10 +2458,12 @@ def list_v1_tasks(
     authorization: Optional[str] = Header(None),
     status: Optional[str] = Query(default=None),
     keyword: Optional[str] = Query(default=None),
+    updated_after: Optional[str] = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ):
     init_db()
+    updated_after = normalize_query_time(updated_after)
     user = require_user(authorization)
     if not user:
         return api_error(401, 40102, "unauthorized")
@@ -2100,6 +2488,12 @@ def list_v1_tasks(
             if lowered in task["task_id"].lower()
             or lowered in task["sample_name"].lower()
             or lowered in (task.get("batch") or "").lower()
+        ]
+    if updated_after:
+        tasks = [
+            task
+            for task in tasks
+            if task.get("updated_at") and task["updated_at"] > updated_after
         ]
 
     start = (page - 1) * page_size
@@ -2656,6 +3050,301 @@ def revoke_v1_qr_token(
     return api_success(serialize_qr_token(updated), "qr token revoked")
 
 
+@app.post("/api/v1/face/enroll")
+def enroll_v1_face(
+    payload: FaceEnrollIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if not payload.consent:
+        return api_error(400, 40020, "face consent required")
+    timestamp = now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO face_profiles (
+                user_id, template_id, consent_at, quality_score,
+                status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                template_id = excluded.template_id,
+                consent_at = excluded.consent_at,
+                quality_score = excluded.quality_score,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user["user_id"],
+                payload.template_id,
+                timestamp,
+                payload.quality_score,
+                "active",
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM face_profiles WHERE user_id = ?",
+            (user["user_id"],),
+        ).fetchone()
+        record_audit(
+            conn,
+            "face.enroll",
+            user_id=user["user_id"],
+            resource_type="face_profile",
+            resource_id=str(row["id"]),
+        )
+    return api_success(serialize_face_profile(row), "face enrolled")
+
+
+@app.get("/api/v1/face/profile")
+def get_v1_face_profile(authorization: Optional[str] = Header(None)):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM face_profiles WHERE user_id = ? AND status = ?",
+            (user["user_id"], "active"),
+        ).fetchone()
+    return api_success(serialize_face_profile(row))
+
+
+@app.delete("/api/v1/face/profile")
+def delete_v1_face_profile(authorization: Optional[str] = Header(None)):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    timestamp = now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE face_profiles
+            SET status = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            ("deleted", timestamp, user["user_id"]),
+        )
+        record_audit(
+            conn,
+            "face.delete",
+            user_id=user["user_id"],
+            resource_type="face_profile",
+        )
+    return api_success({"deleted": True}, "face profile deleted")
+
+
+@app.post("/api/v1/face/verify")
+def verify_v1_face(
+    payload: FaceVerifyIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    timestamp = now_iso()
+    threshold = 0.8
+    verified = payload.liveness_passed and payload.similarity_score >= threshold
+    manual_review_required = not verified
+    verification_id = generate_verification_id()
+    location = payload.location
+    with get_connection() as conn:
+        profile = conn.execute(
+            "SELECT * FROM face_profiles WHERE user_id = ? AND status = ?",
+            (user["user_id"], "active"),
+        ).fetchone()
+        if not profile:
+            return api_error(400, 40021, "face profile not enrolled")
+        handoff = conn.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?",
+            (payload.handoff_id,),
+        ).fetchone()
+        if not handoff:
+            return api_error(404, 40405, "handoff not found")
+        conn.execute(
+            """
+            INSERT INTO face_verifications (
+                verification_id, user_id, handoff_id, qr_token,
+                capture_file_id, liveness_token, liveness_passed,
+                similarity_score, threshold, verified,
+                manual_review_required, location_lat, location_lng,
+                location_accuracy, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verification_id,
+                user["user_id"],
+                payload.handoff_id,
+                payload.qr_token,
+                payload.capture_file_id,
+                payload.liveness_token,
+                int(payload.liveness_passed),
+                payload.similarity_score,
+                threshold,
+                int(verified),
+                int(manual_review_required),
+                location.lat if location else None,
+                location.lng if location else None,
+                location.accuracy if location else None,
+                "verified" if verified else "pending_review",
+                timestamp,
+            ),
+        )
+        if manual_review_required:
+            conn.execute(
+                """
+                INSERT INTO face_reviews (
+                    verification_id, reviewer_user_id, status,
+                    decision_at, created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (verification_id, None, "pending_review", None, timestamp),
+            )
+        row = conn.execute(
+            "SELECT * FROM face_verifications WHERE verification_id = ?",
+            (verification_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "face.verify",
+            user_id=user["user_id"],
+            resource_type="face_verification",
+            resource_id=verification_id,
+            task_id=handoff["task_id"],
+        )
+    return api_success(serialize_face_verification(row), "face verified")
+
+
+@app.get("/api/v1/admin/face-reviews")
+def list_v1_admin_face_reviews(
+    authorization: Optional[str] = Header(None),
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] != "admin":
+        return api_error(403, 40301, "forbidden")
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM face_reviews
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return api_success({"limit": limit, "items": [serialize_face_review(row) for row in rows]})
+
+
+@app.post("/api/v1/admin/face-reviews/{review_id}/approve")
+def approve_v1_admin_face_review(
+    review_id: int,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] != "admin":
+        return api_error(403, 40301, "forbidden")
+    timestamp = now_iso()
+    with get_connection() as conn:
+        review = conn.execute(
+            "SELECT * FROM face_reviews WHERE id = ?",
+            (review_id,),
+        ).fetchone()
+        if not review:
+            return api_error(404, 40409, "face review not found")
+        conn.execute(
+            """
+            UPDATE face_reviews
+            SET status = ?, reviewer_user_id = ?, decision_at = ?
+            WHERE id = ?
+            """,
+            ("approved", user["user_id"], timestamp, review_id),
+        )
+        conn.execute(
+            """
+            UPDATE face_verifications
+            SET status = ?, verified = ?, manual_review_required = ?
+            WHERE verification_id = ?
+            """,
+            ("verified", 1, 0, review["verification_id"]),
+        )
+        updated = conn.execute(
+            "SELECT * FROM face_reviews WHERE id = ?",
+            (review_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "face_review.approve",
+            user_id=user["user_id"],
+            resource_type="face_review",
+            resource_id=str(review_id),
+        )
+    return api_success(serialize_face_review(updated), "face review approved")
+
+
+@app.post("/api/v1/admin/face-reviews/{review_id}/reject")
+def reject_v1_admin_face_review(
+    review_id: int,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] != "admin":
+        return api_error(403, 40301, "forbidden")
+    timestamp = now_iso()
+    with get_connection() as conn:
+        review = conn.execute(
+            "SELECT * FROM face_reviews WHERE id = ?",
+            (review_id,),
+        ).fetchone()
+        if not review:
+            return api_error(404, 40409, "face review not found")
+        conn.execute(
+            """
+            UPDATE face_reviews
+            SET status = ?, reviewer_user_id = ?, decision_at = ?
+            WHERE id = ?
+            """,
+            ("rejected", user["user_id"], timestamp, review_id),
+        )
+        conn.execute(
+            """
+            UPDATE face_verifications
+            SET status = ?, verified = ?, manual_review_required = ?
+            WHERE verification_id = ?
+            """,
+            ("rejected", 0, 0, review["verification_id"]),
+        )
+        updated = conn.execute(
+            "SELECT * FROM face_reviews WHERE id = ?",
+            (review_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "face_review.reject",
+            user_id=user["user_id"],
+            resource_type="face_review",
+            resource_id=str(review_id),
+        )
+    return api_success(serialize_face_review(updated), "face review rejected")
+
+
 @app.post("/api/v1/files")
 def create_v1_file(
     payload: CreateFileIn,
@@ -2930,23 +3619,52 @@ def get_v1_latest_telemetry(task_id: str):
 def get_v1_telemetry_history(
     task_id: str,
     limit: int = Query(default=100, ge=1, le=100),
+    start_time: Optional[str] = Query(default=None),
+    end_time: Optional[str] = Query(default=None),
+    cursor: Optional[int] = Query(default=None, ge=1),
+    downsample: int = Query(default=1, ge=1, le=60),
 ):
     init_db()
+    start_time = normalize_query_time(start_time)
+    end_time = normalize_query_time(end_time)
     with get_connection() as conn:
         task = get_task_by_id(conn, task_id)
         if not task:
             return api_error(404, 40401, "task not found")
+        conditions = ["task_id = ?"]
+        params: list[object] = [task_id]
+        if start_time:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
+        if cursor:
+            conditions.append("id < ?")
+            params.append(cursor)
+        params.append(limit)
         rows = conn.execute(
-            """
+            f"""
             SELECT * FROM device_data
-            WHERE task_id = ?
+            WHERE {' AND '.join(conditions)}
             ORDER BY id DESC
             LIMIT ?
             """,
-            (task_id, limit),
+            params,
         ).fetchall()
+    items = [normalize_telemetry(row) for index, row in enumerate(rows)]
+    if downsample > 1:
+        items = [item for index, item in enumerate(items) if index % downsample == 0]
     return api_success(
-        {"limit": limit, "items": [normalize_telemetry(row) for row in rows]}
+        {
+            "limit": limit,
+            "start_time": start_time,
+            "end_time": end_time,
+            "cursor": cursor,
+            "next_cursor": rows[-1]["id"] if rows else None,
+            "downsample": downsample,
+            "items": items,
+        }
     )
 
 
@@ -2960,6 +3678,7 @@ def get_v1_alarms(
         task = get_task_by_id(conn, task_id)
         if not task:
             return api_error(404, 40401, "task not found")
+        ensure_task_offline_alarm(conn, task)
         rows = conn.execute(
             """
             SELECT * FROM event_log
@@ -3203,10 +3922,17 @@ def task_state_conflict():
 
 
 @app.post("/api/v1/tasks/{task_id}/start")
-def start_v1_task(task_id: str):
+def start_v1_task(
+    task_id: str,
+    idempotency_key: Optional[str] = Header(None),
+):
     init_db()
     timestamp = now_iso()
     with get_connection() as conn:
+        scope = f"task:{task_id}:start"
+        existing_result = get_idempotent_result(conn, scope, idempotency_key)
+        if existing_result:
+            return api_success(existing_result["data"], existing_result["message"])
         row = get_task_by_id(conn, task_id)
         if not row:
             return api_error(404, 40401, "task not found")
@@ -3242,14 +3968,23 @@ def start_v1_task(task_id: str):
             task_id=task_id,
         )
         updated = get_task_by_id(conn, task_id)
-    return api_success(enrich_task(updated, conn), "task started")
+        data = enrich_task(updated, conn)
+        save_idempotent_result(conn, scope, idempotency_key, data, "task started")
+    return api_success(data, "task started")
 
 
 @app.post("/api/v1/tasks/{task_id}/arrive")
-def arrive_v1_task(task_id: str):
+def arrive_v1_task(
+    task_id: str,
+    idempotency_key: Optional[str] = Header(None),
+):
     init_db()
     timestamp = now_iso()
     with get_connection() as conn:
+        scope = f"task:{task_id}:arrive"
+        existing_result = get_idempotent_result(conn, scope, idempotency_key)
+        if existing_result:
+            return api_success(existing_result["data"], existing_result["message"])
         row = get_task_by_id(conn, task_id)
         if not row:
             return api_error(404, 40401, "task not found")
@@ -3280,14 +4015,23 @@ def arrive_v1_task(task_id: str):
             task_id=task_id,
         )
         updated = get_task_by_id(conn, task_id)
-    return api_success(enrich_task(updated, conn), "task arrived")
+        data = enrich_task(updated, conn)
+        save_idempotent_result(conn, scope, idempotency_key, data, "task arrived")
+    return api_success(data, "task arrived")
 
 
 @app.post("/api/v1/tasks/{task_id}/sign")
-def sign_v1_task(task_id: str):
+def sign_v1_task(
+    task_id: str,
+    idempotency_key: Optional[str] = Header(None),
+):
     init_db()
     timestamp = now_iso()
     with get_connection() as conn:
+        scope = f"task:{task_id}:sign"
+        existing_result = get_idempotent_result(conn, scope, idempotency_key)
+        if existing_result:
+            return api_success(existing_result["data"], existing_result["message"])
         row = get_task_by_id(conn, task_id)
         if not row:
             return api_error(404, 40401, "task not found")
@@ -3318,11 +4062,17 @@ def sign_v1_task(task_id: str):
             task_id=task_id,
         )
         updated = get_task_by_id(conn, task_id)
-    return api_success(enrich_task(updated, conn), "task signed")
+        data = enrich_task(updated, conn)
+        save_idempotent_result(conn, scope, idempotency_key, data, "task signed")
+    return api_success(data, "task signed")
 
 
 @app.post("/api/v1/tasks/{task_id}/reject")
-def reject_v1_task(task_id: str, data: RejectTaskIn):
+def reject_v1_task(
+    task_id: str,
+    data: RejectTaskIn,
+    idempotency_key: Optional[str] = Header(None),
+):
     init_db()
     reason = data.reason.strip()
     if not reason:
@@ -3330,6 +4080,10 @@ def reject_v1_task(task_id: str, data: RejectTaskIn):
 
     timestamp = now_iso()
     with get_connection() as conn:
+        scope = f"task:{task_id}:reject"
+        existing_result = get_idempotent_result(conn, scope, idempotency_key)
+        if existing_result:
+            return api_success(existing_result["data"], existing_result["message"])
         row = get_task_by_id(conn, task_id)
         if not row:
             return api_error(404, 40401, "task not found")
@@ -3362,7 +4116,9 @@ def reject_v1_task(task_id: str, data: RejectTaskIn):
             detail=reason,
         )
         updated = get_task_by_id(conn, task_id)
-    return api_success(enrich_task(updated, conn), "task rejected")
+        result = enrich_task(updated, conn)
+        save_idempotent_result(conn, scope, idempotency_key, result, "task rejected")
+    return api_success(result, "task rejected")
 
 
 @app.get("/api/v1/tasks/{task_id}/trace-report")

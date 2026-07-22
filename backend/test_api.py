@@ -1,4 +1,7 @@
 import os
+import hashlib
+import hmac
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -8,10 +11,18 @@ os.environ["DATABASE_PATH"] = tempfile.NamedTemporaryFile(delete=False).name
 import pytest
 from fastapi.testclient import TestClient
 
-from main import DATABASE_PATH, app, init_db
+from main import DATABASE_PATH, app, init_db, now_iso
 
 
 client = TestClient(app)
+
+
+def sign_device_payload(payload: dict, secret: str, timestamp: str, nonce: str) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    body_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    message = f"{payload['device_id']}.{timestamp}.{nonce}.{body_hash}"
+    key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    return hmac.new(key.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 @pytest.fixture(autouse=True)
@@ -385,6 +396,42 @@ def test_v1_task_list_is_empty_for_new_sender_and_can_create_task():
     assert [item["task_id"] for item in task_list.json()["data"]["items"]] == [
         task["task_id"]
     ]
+
+
+def test_v1_task_list_supports_updated_after_filter():
+    token, _ = register_and_login("sender_updated_after", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    old_task = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"sample_name": "较早任务"},
+    )
+    assert old_task.status_code == 200
+    new_task = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"sample_name": "较新任务"},
+    )
+    assert new_task.status_code == 200
+
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        conn.execute(
+            "UPDATE task_handoff SET updated_at = ? WHERE task_id = ?",
+            ("2026-07-22T10:00:00+08:00", old_task.json()["data"]["task_id"]),
+        )
+        conn.execute(
+            "UPDATE task_handoff SET updated_at = ? WHERE task_id = ?",
+            ("2026-07-22T11:00:00+08:00", new_task.json()["data"]["task_id"]),
+        )
+
+    response = client.get(
+        "/api/v1/tasks?updated_after=2026-07-22T10:30:00+08:00",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [item["task_id"] for item in items] == [new_task.json()["data"]["task_id"]]
 
 
 def test_v1_task_permission_assign_cancel_and_precheck():
@@ -1050,6 +1097,165 @@ def test_v1_device_telemetry_deduplicates_device_sequence_and_updates_device_sta
     assert device["current_task_id"] == task_id
 
 
+def test_v1_device_telemetry_requires_hmac_for_secret_enabled_device():
+    sender_token, _ = register_and_login("sender_hmac", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {sender_token}"}
+    created = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"sample_name": "HMAC测试样本"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+    assert client.post(
+        "/api/v1/devices",
+        headers=headers,
+        json={"device_id": "CLD-HMAC-001", "device_secret": "secret-001"},
+    ).status_code == 200
+    assert client.post(
+        "/api/v1/devices/CLD-HMAC-001/bind",
+        headers=headers,
+        json={"task_id": task_id},
+    ).status_code == 200
+
+    payload = {
+        "device_id": "CLD-HMAC-001",
+        "task_id": task_id,
+        "sequence": 9001,
+        "captured_at": "2026-07-22T22:01:00+08:00",
+        "temperature": 5.6,
+        "humidity": 60.5,
+        "battery": 82,
+        "box_status": "BOX_CLOSED",
+        "move_status": "STABLE",
+        "light_raw": 128,
+    }
+    timestamp = now_iso()
+    nonce = "nonce-hmac-001"
+
+    missing = client.post("/api/v1/device/telemetry", json=payload)
+    assert missing.status_code == 401
+
+    bad = client.post(
+        "/api/v1/device/telemetry",
+        json=payload,
+        headers={
+            "X-Device-Id": "CLD-HMAC-001",
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "X-Signature": "bad-signature",
+        },
+    )
+    assert bad.status_code == 401
+
+    signature = sign_device_payload(payload, "secret-001", timestamp, nonce)
+    good = client.post(
+        "/api/v1/device/telemetry",
+        json=payload,
+        headers={
+            "X-Device-Id": "CLD-HMAC-001",
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "X-Signature": signature,
+        },
+    )
+    assert good.status_code == 200
+    assert good.json()["data"]["saved"] == 1
+
+    replay = client.post(
+        "/api/v1/device/telemetry",
+        json={**payload, "sequence": 9002},
+        headers={
+            "X-Device-Id": "CLD-HMAC-001",
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "X-Signature": sign_device_payload({**payload, "sequence": 9002}, "secret-001", timestamp, nonce),
+        },
+    )
+    assert replay.status_code == 409
+    assert replay.json()["code"] == 40940
+
+
+def test_v1_face_profile_verify_and_manual_review_flow():
+    admin_token, _ = register_and_login("admin_face", "admin", "组委会")
+    sender_token, _ = register_and_login("sender_face", "sender", "高校实验室")
+    carrier_token, carrier = register_and_login("carrier_face", "carrier", "迅达冷链")
+    sender_headers = {"Authorization": f"Bearer {sender_token}"}
+    carrier_headers = {"Authorization": f"Bearer {carrier_token}"}
+
+    enrolled = client.post(
+        "/api/v1/face/enroll",
+        headers=carrier_headers,
+        json={
+            "template_id": "tpl_carrier_face",
+            "consent": True,
+            "quality_score": 0.92,
+        },
+    )
+    assert enrolled.status_code == 200
+    assert enrolled.json()["data"]["status"] == "active"
+    assert enrolled.json()["data"]["consent_at"]
+
+    profile = client.get("/api/v1/face/profile", headers=carrier_headers)
+    assert profile.status_code == 200
+    assert profile.json()["data"]["has_profile"] is True
+    assert profile.json()["data"]["template_id"] == "tpl_carrier_face"
+
+    created = client.post(
+        "/api/v1/tasks",
+        headers=sender_headers,
+        json={"sample_name": "人脸核验测试样本", "device_id": "CLD-FACE-001"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+    handoff = client.post(
+        f"/api/v1/tasks/{task_id}/handoffs",
+        headers=sender_headers,
+        json={"handoff_type": "sender_to_carrier", "to_user_id": carrier["user_id"]},
+    )
+    assert handoff.status_code == 200
+    handoff_id = handoff.json()["data"]["handoff_id"]
+
+    failed_verify = client.post(
+        "/api/v1/face/verify",
+        headers=carrier_headers,
+        json={
+            "handoff_id": handoff_id,
+            "qr_token": "qr_demo",
+            "capture_file_id": "FILE_demo",
+            "liveness_token": "live_demo",
+            "liveness_passed": True,
+            "similarity_score": 0.62,
+            "location": {"lat": 30.12, "lng": 120.45, "accuracy": 20},
+        },
+    )
+    assert failed_verify.status_code == 200
+    verify_data = failed_verify.json()["data"]
+    assert verify_data["verified"] is False
+    assert verify_data["manual_review_required"] is True
+    assert verify_data["verification_id"].startswith("FV-")
+
+    reviews = client.get(
+        "/api/v1/admin/face-reviews",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert reviews.status_code == 200
+    review = reviews.json()["data"]["items"][0]
+    assert review["verification_id"] == verify_data["verification_id"]
+    assert review["status"] == "pending_review"
+
+    approved = client.post(
+        f"/api/v1/admin/face-reviews/{review['id']}/approve",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["data"]["status"] == "approved"
+
+    deleted = client.delete("/api/v1/face/profile", headers=carrier_headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["data"]["deleted"] is True
+
+
 def test_v1_admin_can_list_users_tasks_and_update_user_status():
     admin_token, _ = register_and_login("admin_manage", "admin", "组委会")
     sender_token, sender = register_and_login("sender_manage", "sender", "高校实验室")
@@ -1197,3 +1403,137 @@ def test_v1_trace_report_pdf_returns_downloadable_pdf():
     assert response.headers["content-type"] == "application/pdf"
     assert response.content.startswith(b"%PDF-")
     assert b"TASK-001" in response.content
+
+
+def test_v1_task_status_actions_support_idempotency_key():
+    first = client.post(
+        "/api/v1/tasks/TASK-001/start",
+        headers={"Idempotency-Key": "start-once-001"},
+    )
+    assert first.status_code == 200
+    first_data = first.json()["data"]
+    assert first_data["status"] == "in_transit"
+
+    repeated = client.post(
+        "/api/v1/tasks/TASK-001/start",
+        headers={"Idempotency-Key": "start-once-001"},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["status"] == "in_transit"
+    assert repeated.json()["data"]["started_at"] == first_data["started_at"]
+
+    sign = client.post(
+        "/api/v1/tasks/TASK-001/sign",
+        headers={"Idempotency-Key": "sign-once-001"},
+    )
+    assert sign.status_code == 200
+    signed_at = sign.json()["data"]["signed_at"]
+
+    repeated_sign = client.post(
+        "/api/v1/tasks/TASK-001/sign",
+        headers={"Idempotency-Key": "sign-once-001"},
+    )
+    assert repeated_sign.status_code == 200
+    assert repeated_sign.json()["data"]["status"] == "signed"
+    assert repeated_sign.json()["data"]["signed_at"] == signed_at
+
+
+def test_v1_telemetry_history_supports_time_cursor_and_downsample_filters():
+    rows = [
+        ("2026-07-22T10:00:00+08:00", 4.1, 1),
+        ("2026-07-22T10:01:00+08:00", 4.2, 2),
+        ("2026-07-22T10:02:00+08:00", 4.3, 3),
+        ("2026-07-22T10:03:00+08:00", 4.4, 4),
+    ]
+    for captured_at, temperature, sequence in rows:
+        response = client.post(
+            "/api/v1/device/telemetry",
+            json={
+                "device_id": "CLD-001",
+                "task_id": "TASK-001",
+                "sequence": sequence,
+                "captured_at": captured_at,
+                "temperature": temperature,
+                "humidity": 60.0,
+                "battery": 90,
+                "box_status": "BOX_CLOSED",
+                "move_status": "STABLE",
+                "light_raw": 100,
+            },
+        )
+        assert response.status_code == 200
+
+    filtered = client.get(
+        "/api/v1/tasks/TASK-001/telemetry/history"
+        "?start_time=2026-07-22T10:01:00+08:00"
+        "&end_time=2026-07-22T10:03:00+08:00"
+        "&limit=10"
+    )
+    assert filtered.status_code == 200
+    filtered_data = filtered.json()["data"]
+    assert [item["sequence"] for item in filtered_data["items"]] == [4, 3, 2]
+    assert filtered_data["next_cursor"] == 2
+
+    cursor_page = client.get(
+        "/api/v1/tasks/TASK-001/telemetry/history?cursor=3&limit=10"
+    )
+    assert cursor_page.status_code == 200
+    assert [item["sequence"] for item in cursor_page.json()["data"]["items"]] == [2, 1]
+
+    downsampled = client.get(
+        "/api/v1/tasks/TASK-001/telemetry/history?limit=10&downsample=2"
+    )
+    assert downsampled.status_code == 200
+    assert [item["sequence"] for item in downsampled.json()["data"]["items"]] == [4, 2]
+
+
+def test_v1_device_low_battery_and_offline_generate_alarms():
+    response = client.post(
+        "/api/v1/device/telemetry",
+        json={
+            "device_id": "CLD-001",
+            "task_id": "TASK-001",
+            "sequence": 5001,
+            "captured_at": "2026-07-22T10:10:00+08:00",
+            "temperature": 4.2,
+            "humidity": 60.0,
+            "battery": 15,
+            "box_status": "BOX_CLOSED",
+            "move_status": "STABLE",
+            "light_raw": 100,
+        },
+    )
+    assert response.status_code == 200
+
+    alarms = client.get("/api/v1/tasks/TASK-001/alarms?limit=10")
+    assert alarms.status_code == 200
+    alarm_types = [item["event_type"] for item in alarms.json()["data"]["items"]]
+    assert "LOW_BATTERY" in alarm_types
+
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE devices
+            SET last_seen_at = ?, status = ?
+            WHERE device_id = ?
+            """,
+            ("2026-07-22T08:00:00+08:00", "online", "CLD-001"),
+        )
+
+    devices = client.get("/api/v1/devices")
+    assert devices.status_code == 401
+
+    admin_token, _ = register_and_login("admin_offline", "admin", "组委会")
+    devices = client.get(
+        "/api/v1/devices",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert devices.status_code == 200
+    device = devices.json()["data"]["items"][0]
+    assert device["device_id"] == "CLD-001"
+    assert device["status"] == "offline"
+
+    offline_alarms = client.get("/api/v1/tasks/TASK-001/alarms?limit=10")
+    assert offline_alarms.status_code == 200
+    offline_types = [item["event_type"] for item in offline_alarms.json()["data"]["items"]]
+    assert "DEVICE_OFFLINE" in offline_types
