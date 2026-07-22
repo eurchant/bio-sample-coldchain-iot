@@ -686,3 +686,463 @@ def test_v1_device_heartbeat_records_online_status():
     assert data["status"] == "online"
     assert data["battery"] == 83
     assert data["network"] == "4G"
+
+
+def test_v1_devices_can_be_registered_bound_and_listed():
+    sender_token, _ = register_and_login("sender_device_bind", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {sender_token}"}
+    created_task = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={
+            "sample_name": "设备绑定测试样本",
+            "device_id": "CLD-BIND-001",
+        },
+    )
+    assert created_task.status_code == 200
+    task_id = created_task.json()["data"]["task_id"]
+
+    registered = client.post(
+        "/api/v1/devices",
+        headers=headers,
+        json={
+            "device_id": "CLD-BIND-001",
+            "device_name": "UniKnect 一号箱",
+            "model": "UniKnect Kit GEN-1 Pro",
+        },
+    )
+    assert registered.status_code == 200
+    assert registered.json()["data"]["device_id"] == "CLD-BIND-001"
+    assert registered.json()["data"]["status"] == "available"
+
+    bound = client.post(
+        "/api/v1/devices/CLD-BIND-001/bind",
+        headers=headers,
+        json={"task_id": task_id},
+    )
+    assert bound.status_code == 200
+    assert bound.json()["data"]["task_id"] == task_id
+    assert bound.json()["data"]["status"] == "bound"
+
+    task = client.get(f"/api/v1/tasks/{task_id}", headers=headers)
+    assert task.status_code == 200
+    assert task.json()["data"]["device_id"] == "CLD-BIND-001"
+
+    devices = client.get("/api/v1/devices", headers=headers)
+    assert devices.status_code == 200
+    assert devices.json()["data"]["items"][0]["device_id"] == "CLD-BIND-001"
+
+    bindings = client.get("/api/v1/devices/CLD-BIND-001/bindings", headers=headers)
+    assert bindings.status_code == 200
+    assert bindings.json()["data"]["items"][0]["task_id"] == task_id
+
+    unbound = client.post("/api/v1/devices/CLD-BIND-001/unbind", headers=headers)
+    assert unbound.status_code == 200
+    assert unbound.json()["data"]["status"] == "available"
+
+
+def test_v1_alarm_ack_and_resolve_flow():
+    payload = {
+        "device_id": "CLD-001",
+        "task_id": "TASK-001",
+        "temperature": 31.2,
+        "humidity": 66.0,
+        "light_raw": 22000,
+        "box_status": "BOX_OPEN",
+        "move_status": "STABLE",
+        "temp_status": "TEMP_ALERT",
+        "acc_total": 10.2,
+        "motion_score": 1.2,
+    }
+    assert client.post("/api/device/data", json=payload).status_code == 200
+
+    alarms = client.get("/api/v1/tasks/TASK-001/alarms")
+    assert alarms.status_code == 200
+    alarm = alarms.json()["data"]["items"][0]
+    assert alarm["alarm_status"] == "new"
+
+    acked = client.post(f"/api/v1/alarms/{alarm['event_id']}/ack")
+    assert acked.status_code == 200
+    assert acked.json()["data"]["alarm_status"] == "acknowledged"
+    assert acked.json()["data"]["acknowledged_at"]
+
+    resolved = client.post(
+        f"/api/v1/alarms/{alarm['event_id']}/resolve",
+        json={"resolution": "已确认温度恢复正常，继续运输"},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["data"]["alarm_status"] == "resolved"
+    assert resolved.json()["data"]["resolution"] == "已确认温度恢复正常，继续运输"
+
+
+def test_v1_handoff_session_can_confirm_responsibility_transfer():
+    sender_token, _ = register_and_login("sender_handoff", "sender", "高校实验室")
+    carrier_token, carrier = register_and_login("carrier_handoff", "carrier", "迅达冷链")
+    sender_headers = {"Authorization": f"Bearer {sender_token}"}
+    carrier_headers = {"Authorization": f"Bearer {carrier_token}"}
+
+    created = client.post(
+        "/api/v1/tasks",
+        headers=sender_headers,
+        json={"sample_name": "交接测试样本", "device_id": "CLD-HO-001"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+    assert client.post(
+        f"/api/v1/tasks/{task_id}/assign",
+        headers=sender_headers,
+        json={"carrier_user_id": carrier["user_id"]},
+    ).status_code == 200
+
+    handoff = client.post(
+        f"/api/v1/tasks/{task_id}/handoffs",
+        headers=sender_headers,
+        json={"handoff_type": "sender_to_carrier", "to_user_id": carrier["user_id"]},
+    )
+    assert handoff.status_code == 200
+    handoff_data = handoff.json()["data"]
+    assert handoff_data["status"] == "pending"
+    assert handoff_data["from_user_id"]
+    assert handoff_data["to_user_id"] == carrier["user_id"]
+
+    detail = client.get(
+        f"/api/v1/handoffs/{handoff_data['handoff_id']}",
+        headers=carrier_headers,
+    )
+    assert detail.status_code == 200
+    assert detail.json()["data"]["task_id"] == task_id
+
+    confirmed = client.post(
+        f"/api/v1/handoffs/{handoff_data['handoff_id']}/confirm",
+        headers=carrier_headers,
+        json={"location": {"lat": 30.12, "lng": 120.45, "accuracy": 20}},
+    )
+    assert confirmed.status_code == 200
+    confirmed_data = confirmed.json()["data"]
+    assert confirmed_data["status"] == "confirmed"
+    assert confirmed_data["task_status"] == "in_transit"
+    assert confirmed_data["current_custodian"] == carrier["user_id"]
+    assert confirmed_data["handoff_certificate_no"].startswith("HO-CERT-")
+    assert confirmed_data["trace_hash"]
+
+    task = client.get(f"/api/v1/tasks/{task_id}", headers=carrier_headers)
+    assert task.status_code == 200
+    assert task.json()["data"]["status"] == "in_transit"
+
+
+def test_v1_admin_audit_logs_record_key_actions():
+    admin_token, _ = register_and_login("admin_audit", "admin", "组委会")
+    sender_token, _ = register_and_login("sender_audit", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {sender_token}"}
+
+    created = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"sample_name": "审计日志测试样本", "device_id": "CLD-AUDIT-001"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+    assert client.post(f"/api/v1/tasks/{task_id}/start").status_code == 200
+
+    logs = client.get(
+        "/api/v1/admin/audit-logs",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert logs.status_code == 200
+    actions = [item["action"] for item in logs.json()["data"]["items"]]
+    assert "auth.register" in actions
+    assert "task.create" in actions
+    assert "task.start" in actions
+
+    forbidden = client.get("/api/v1/admin/audit-logs", headers=headers)
+    assert forbidden.status_code == 403
+
+
+def test_v1_qr_token_can_be_verified_once_and_revoked():
+    sender_token, _ = register_and_login("sender_qr", "sender", "高校实验室")
+    carrier_token, carrier = register_and_login("carrier_qr", "carrier", "迅达冷链")
+    sender_headers = {"Authorization": f"Bearer {sender_token}"}
+
+    created = client.post(
+        "/api/v1/tasks",
+        headers=sender_headers,
+        json={"sample_name": "二维码测试样本", "device_id": "CLD-QR-001"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+    handoff = client.post(
+        f"/api/v1/tasks/{task_id}/handoffs",
+        headers=sender_headers,
+        json={"handoff_type": "sender_to_carrier", "to_user_id": carrier["user_id"]},
+    )
+    assert handoff.status_code == 200
+    handoff_id = handoff.json()["data"]["handoff_id"]
+
+    generated = client.post(
+        f"/api/v1/tasks/{task_id}/qr-tokens",
+        headers=sender_headers,
+        json={"action": "handoff_send", "handoff_id": handoff_id, "ttl_seconds": 60},
+    )
+    assert generated.status_code == 200
+    qr_data = generated.json()["data"]
+    assert qr_data["token"].startswith("qr_")
+    assert qr_data["token_id"]
+    assert qr_data["qr_payload"] == f"coldchain://handoff?token={qr_data['token']}"
+    assert qr_data["refresh_after"] == 45
+
+    verified = client.post(
+        "/api/v1/qr-tokens/verify",
+        headers={"Authorization": f"Bearer {carrier_token}"},
+        json={"token": qr_data["token"]},
+    )
+    assert verified.status_code == 200
+    assert verified.json()["data"]["valid"] is True
+    assert verified.json()["data"]["task_id"] == task_id
+    assert verified.json()["data"]["handoff_id"] == handoff_id
+
+    repeated = client.post(
+        "/api/v1/qr-tokens/verify",
+        headers={"Authorization": f"Bearer {carrier_token}"},
+        json={"token": qr_data["token"]},
+    )
+    assert repeated.status_code == 410
+    assert repeated.json()["code"] == 41010
+
+    second = client.post(
+        f"/api/v1/tasks/{task_id}/qr-tokens",
+        headers=sender_headers,
+        json={"action": "handoff_send", "handoff_id": handoff_id, "ttl_seconds": 60},
+    )
+    assert second.status_code == 200
+    revoked = client.post(
+        f"/api/v1/qr-tokens/{second.json()['data']['token_id']}/revoke",
+        headers=sender_headers,
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["data"]["status"] == "revoked"
+
+    revoked_verify = client.post(
+        "/api/v1/qr-tokens/verify",
+        headers={"Authorization": f"Bearer {carrier_token}"},
+        json={"token": second.json()["data"]["token"]},
+    )
+    assert revoked_verify.status_code == 410
+
+
+def test_v1_device_telemetry_deduplicates_device_sequence_and_updates_device_status():
+    first = client.post(
+        "/api/v1/device/telemetry",
+        json={
+            "device_id": "CLD-DEDUP-001",
+            "task_id": "TASK-001",
+            "sequence": 2001,
+            "captured_at": "2026-07-22T20:01:00+08:00",
+            "temperature": 5.1,
+            "humidity": 61.2,
+            "battery": 77,
+            "box_status": "BOX_CLOSED",
+            "move_status": "STABLE",
+            "light_raw": 130,
+        },
+    )
+    assert first.status_code == 409
+
+    sender_token, _ = register_and_login("sender_dedup", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {sender_token}"}
+    task = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"sample_name": "去重测试样本"},
+    )
+    assert task.status_code == 200
+    task_id = task.json()["data"]["task_id"]
+    assert client.post(
+        "/api/v1/devices",
+        headers=headers,
+        json={"device_id": "CLD-DEDUP-001"},
+    ).status_code == 200
+    assert client.post(
+        "/api/v1/devices/CLD-DEDUP-001/bind",
+        headers=headers,
+        json={"task_id": task_id},
+    ).status_code == 200
+
+    payload = {
+        "device_id": "CLD-DEDUP-001",
+        "task_id": task_id,
+        "sequence": 2001,
+        "captured_at": "2026-07-22T20:01:00+08:00",
+        "temperature": 5.1,
+        "humidity": 61.2,
+        "battery": 77,
+        "box_status": "BOX_CLOSED",
+        "move_status": "STABLE",
+        "light_raw": 130,
+    }
+    saved = client.post("/api/v1/device/telemetry", json=payload)
+    assert saved.status_code == 200
+    assert saved.json()["data"]["saved"] == 1
+
+    duplicate = client.post("/api/v1/device/telemetry", json=payload)
+    assert duplicate.status_code == 200
+    assert duplicate.json()["data"]["saved"] == 0
+    assert duplicate.json()["data"]["duplicate"] is True
+
+    history = client.get(f"/api/v1/tasks/{task_id}/telemetry/history?limit=10")
+    assert len(history.json()["data"]["items"]) == 1
+
+    devices = client.get("/api/v1/devices", headers=headers)
+    device = devices.json()["data"]["items"][0]
+    assert device["device_id"] == "CLD-DEDUP-001"
+    assert device["status"] == "online"
+    assert device["battery"] == 77
+    assert device["current_task_id"] == task_id
+
+
+def test_v1_admin_can_list_users_tasks_and_update_user_status():
+    admin_token, _ = register_and_login("admin_manage", "admin", "组委会")
+    sender_token, sender = register_and_login("sender_manage", "sender", "高校实验室")
+    task = client.post(
+        "/api/v1/tasks",
+        headers={"Authorization": f"Bearer {sender_token}"},
+        json={"sample_name": "管理员任务查询样本", "device_id": "CLD-ADMIN-001"},
+    )
+    assert task.status_code == 200
+    task_id = task.json()["data"]["task_id"]
+
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    users = client.get("/api/v1/admin/users", headers=admin_headers)
+    assert users.status_code == 200
+    usernames = [item["username"] for item in users.json()["data"]["items"]]
+    assert "sender_manage" in usernames
+
+    tasks = client.get("/api/v1/admin/tasks", headers=admin_headers)
+    assert tasks.status_code == 200
+    task_ids = [item["task_id"] for item in tasks.json()["data"]["items"]]
+    assert task_id in task_ids
+
+    forbidden = client.get(
+        "/api/v1/admin/users",
+        headers={"Authorization": f"Bearer {sender_token}"},
+    )
+    assert forbidden.status_code == 403
+
+    updated = client.patch(
+        f"/api/v1/admin/users/{sender['user_id']}/status",
+        headers=admin_headers,
+        json={"status": "disabled"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["data"]["status"] == "disabled"
+
+    disabled_login = client.post(
+        "/api/v1/auth/login",
+        json={"phone": "sender_manage", "password": "password123"},
+    )
+    assert disabled_login.status_code == 403
+
+    disabled_token = client.get(
+        "/api/v1/admin/users",
+        headers={"Authorization": f"Bearer {sender_token}"},
+    )
+    assert disabled_token.status_code == 401
+
+
+def test_v1_files_evidence_is_recorded_and_included_in_trace_report():
+    sender_token, _ = register_and_login("sender_file", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {sender_token}"}
+    created = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"sample_name": "证据文件测试样本", "device_id": "CLD-FILE-001"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+
+    uploaded = client.post(
+        "/api/v1/files",
+        headers=headers,
+        json={
+            "task_id": task_id,
+            "file_name": "precheck-photo.jpg",
+            "file_type": "image/jpeg",
+            "file_size": 12345,
+            "sha256": "a" * 64,
+            "usage": "precheck",
+            "related_type": "task",
+            "related_id": task_id,
+            "storage_url": "local://evidence/precheck-photo.jpg",
+        },
+    )
+    assert uploaded.status_code == 200
+    file_data = uploaded.json()["data"]
+    assert file_data["file_id"].startswith("FILE-")
+    assert file_data["task_id"] == task_id
+    assert file_data["sha256"] == "a" * 64
+
+    file_detail = client.get(f"/api/v1/files/{file_data['file_id']}", headers=headers)
+    assert file_detail.status_code == 200
+    assert file_detail.json()["data"]["download_url"] == "local://evidence/precheck-photo.jpg"
+    assert file_detail.json()["data"]["expires_in"] == 300
+
+    report = client.get(f"/api/v1/tasks/{task_id}/trace-report", headers=headers)
+    assert report.status_code == 200
+    report_data = report.json()["data"]
+    assert report_data["summary"]["evidence_count"] == 1
+    assert report_data["evidence_files"][0]["file_id"] == file_data["file_id"]
+    assert report_data["trace_hash"]
+    assert report_data["report_version"] == "MVP-1"
+
+
+def test_v1_notifications_are_created_for_task_alarm_and_can_be_read():
+    sender_token, _ = register_and_login("sender_notify", "sender", "高校实验室")
+    headers = {"Authorization": f"Bearer {sender_token}"}
+    created = client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"sample_name": "通知测试样本", "device_id": "CLD-NOTIFY-001"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["data"]["task_id"]
+
+    alert = client.post(
+        "/api/v1/device/telemetry",
+        json={
+            "device_id": "CLD-NOTIFY-001",
+            "task_id": task_id,
+            "sequence": 3001,
+            "captured_at": "2026-07-22T21:01:00+08:00",
+            "temperature": 31.2,
+            "humidity": 66.0,
+            "battery": 76,
+            "box_status": "BOX_OPEN",
+            "move_status": "STABLE",
+            "temp_status": "TEMP_ALERT",
+            "light_raw": 22000,
+        },
+    )
+    assert alert.status_code == 200
+
+    notifications = client.get("/api/v1/notifications", headers=headers)
+    assert notifications.status_code == 200
+    item = notifications.json()["data"]["items"][0]
+    assert item["task_id"] == task_id
+    assert item["category"] == "alarm"
+    assert item["is_read"] is False
+    messages = [entry["message"] for entry in notifications.json()["data"]["items"]]
+    assert any("温度异常" in message or "开箱" in message for message in messages)
+
+    read = client.post(f"/api/v1/notifications/{item['id']}/read", headers=headers)
+    assert read.status_code == 200
+    assert read.json()["data"]["is_read"] is True
+    assert read.json()["data"]["read_at"]
+
+
+def test_v1_trace_report_pdf_returns_downloadable_pdf():
+    assert client.post("/api/v1/tasks/TASK-001/start").status_code == 200
+    response = client.get("/api/v1/tasks/TASK-001/trace-report.pdf")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content.startswith(b"%PDF-")
+    assert b"TASK-001" in response.content

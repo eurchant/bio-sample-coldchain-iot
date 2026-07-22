@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 import secrets
@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import Body, FastAPI, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 
@@ -133,6 +133,59 @@ class DeviceHeartbeatIn(BaseModel):
     rssi: Optional[int] = None
     network: Optional[str] = Field(None, max_length=40)
     timestamp: Optional[str] = None
+
+
+class RegisterDeviceIn(BaseModel):
+    device_id: str = Field(..., min_length=1, max_length=80)
+    device_name: Optional[str] = Field(None, max_length=120)
+    model: Optional[str] = Field(None, max_length=120)
+
+
+class BindDeviceIn(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=80)
+
+
+class ResolveAlarmIn(BaseModel):
+    resolution: str = Field(..., min_length=1, max_length=300)
+
+
+class CreateHandoffIn(BaseModel):
+    handoff_type: str = Field(..., examples=["sender_to_carrier"])
+    to_user_id: int
+
+
+class HandoffConfirmIn(BaseModel):
+    location: Optional[LocationIn] = None
+
+
+class HandoffRejectIn(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=200)
+
+
+class CreateQrTokenIn(BaseModel):
+    action: str = Field(..., max_length=60)
+    handoff_id: str = Field(..., max_length=80)
+    ttl_seconds: int = Field(default=60, ge=10, le=300)
+
+
+class VerifyQrTokenIn(BaseModel):
+    token: str = Field(..., min_length=1, max_length=160)
+
+
+class UpdateUserStatusIn(BaseModel):
+    status: str = Field(..., examples=["active"])
+
+
+class CreateFileIn(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=80)
+    file_name: str = Field(..., min_length=1, max_length=200)
+    file_type: str = Field(..., min_length=1, max_length=120)
+    file_size: int = Field(..., ge=0)
+    sha256: str = Field(..., min_length=64, max_length=64)
+    usage: str = Field(..., max_length=80)
+    related_type: Optional[str] = Field(None, max_length=80)
+    related_id: Optional[str] = Field(None, max_length=120)
+    storage_url: Optional[str] = Field(None, max_length=300)
 
 
 class RejectTaskIn(BaseModel):
@@ -301,11 +354,131 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS devices (
+                device_id TEXT PRIMARY KEY,
+                device_name TEXT,
+                model TEXT,
+                status TEXT NOT NULL,
+                current_task_id TEXT,
+                battery INTEGER,
+                last_seen_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                bound_at TEXT NOT NULL,
+                unbound_at TEXT,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS handoffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                handoff_id TEXT NOT NULL UNIQUE,
+                task_id TEXT NOT NULL,
+                handoff_type TEXT NOT NULL,
+                from_user_id INTEGER,
+                to_user_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                location_lat REAL,
+                location_lng REAL,
+                location_accuracy REAL,
+                reason TEXT,
+                certificate_no TEXT,
+                trace_hash TEXT,
+                created_at TEXT NOT NULL,
+                confirmed_at TEXT,
+                rejected_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT NOT NULL,
+                resource_type TEXT,
+                resource_id TEXT,
+                task_id TEXT,
+                detail TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qr_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                task_id TEXT NOT NULL,
+                handoff_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                issuer_user_id INTEGER,
+                nonce TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                revoked_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT NOT NULL UNIQUE,
+                task_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                usage TEXT NOT NULL,
+                related_type TEXT,
+                related_id TEXT,
+                storage_url TEXT,
+                uploader_user_id INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                task_id TEXT,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                category TEXT NOT NULL,
+                is_read INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                read_at TEXT
+            )
+            """
+        )
         ensure_column(conn, "device_data", "sequence", "INTEGER")
         ensure_column(conn, "device_data", "battery", "INTEGER")
         ensure_column(conn, "device_data", "lat", "REAL")
         ensure_column(conn, "device_data", "lng", "REAL")
         ensure_column(conn, "device_data", "accuracy", "REAL")
+        ensure_column(conn, "event_log", "alarm_status", "TEXT")
+        ensure_column(conn, "event_log", "acknowledged_at", "TEXT")
+        ensure_column(conn, "event_log", "resolved_at", "TEXT")
+        ensure_column(conn, "event_log", "resolution", "TEXT")
         ensure_column(conn, "task_handoff", "device_id", "TEXT")
         ensure_column(conn, "task_handoff", "rejected_at", "TEXT")
         ensure_column(conn, "task_handoff", "rejection_reason", "TEXT")
@@ -487,9 +660,9 @@ def insert_event_logs(
             """
             INSERT INTO event_log (
                 data_id, task_id, device_id, event_type, event_name,
-                event_detail, timestamp, created_at
+                event_detail, timestamp, created_at, alarm_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data_id,
@@ -500,8 +673,18 @@ def insert_event_logs(
                 item_detail,
                 timestamp,
                 created_at,
+                "new",
             ),
         )
+        for user_id in task_user_ids(conn, data.task_id):
+            create_notification(
+                conn,
+                user_id=user_id,
+                title="冷链异常告警",
+                message=f"{item_name}：{item_detail}",
+                category="alarm",
+                task_id=data.task_id,
+            )
 
 
 def save_device_data(
@@ -564,6 +747,40 @@ def save_device_data(
     return row, None
 
 
+def update_device_seen(
+    conn: sqlite3.Connection,
+    device_id: str,
+    task_id: Optional[str],
+    battery: Optional[int],
+    seen_at: str,
+) -> None:
+    existing = conn.execute(
+        "SELECT * FROM devices WHERE device_id = ?",
+        (device_id,),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE devices
+            SET status = ?, current_task_id = COALESCE(current_task_id, ?),
+                battery = COALESCE(?, battery), last_seen_at = ?, updated_at = ?
+            WHERE device_id = ?
+            """,
+            ("online", task_id, battery, seen_at, seen_at, device_id),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO devices (
+                device_id, status, current_task_id, battery,
+                last_seen_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (device_id, "online", task_id, battery, seen_at, seen_at, seen_at),
+        )
+
+
 def telemetry_temp_status(payload: DeviceTelemetryIn, task: Optional[sqlite3.Row]) -> str:
     if payload.temp_status:
         return payload.temp_status
@@ -604,6 +821,158 @@ def api_error(status_code: int, code: int, message: str) -> JSONResponse:
         status_code=status_code,
         content={"code": code, "message": message, "data": None},
     )
+
+
+def get_user_row(conn: sqlite3.Connection, user_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+def serialize_device(row: sqlite3.Row) -> dict:
+    return row_to_dict(row)
+
+
+def serialize_binding(row: sqlite3.Row) -> dict:
+    return row_to_dict(row)
+
+
+def serialize_handoff(row: sqlite3.Row) -> dict:
+    item = row_to_dict(row)
+    item["handoff_db_id"] = item["id"]
+    return item
+
+
+def serialize_audit_log(row: sqlite3.Row) -> dict:
+    return row_to_dict(row)
+
+
+def serialize_qr_token(row: sqlite3.Row) -> dict:
+    item = row_to_dict(row)
+    item["token_id"] = item["id"]
+    return item
+
+
+def serialize_file(row: sqlite3.Row) -> dict:
+    return row_to_dict(row)
+
+
+def serialize_notification(row: sqlite3.Row) -> dict:
+    item = row_to_dict(row)
+    item["is_read"] = bool(item["is_read"])
+    return item
+
+
+def record_audit(
+    conn: sqlite3.Connection,
+    action: str,
+    user_id: Optional[int] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO audit_logs (
+            user_id, action, resource_type, resource_id, task_id, detail, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, action, resource_type, resource_id, task_id, detail, now_iso()),
+    )
+
+
+def task_user_ids(conn: sqlite3.Connection, task_id: str) -> list[int]:
+    row = get_task_by_id(conn, task_id)
+    if not row:
+        return []
+    task = row_to_dict(row)
+    ids = [
+        task.get("owner_user_id"),
+        task.get("carrier_user_id"),
+        task.get("receiver_user_id"),
+    ]
+    return sorted({int(user_id) for user_id in ids if user_id})
+
+
+def create_notification(
+    conn: sqlite3.Connection,
+    user_id: int,
+    title: str,
+    message: str,
+    category: str,
+    task_id: Optional[str] = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO notifications (
+            user_id, task_id, title, message, category,
+            is_read, created_at, read_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, task_id, title, message, category, 0, now_iso(), None),
+    )
+
+
+def generate_handoff_id() -> str:
+    return f"HO-{secrets.token_hex(6).upper()}"
+
+
+def generate_qr_token() -> str:
+    return f"qr_{secrets.token_urlsafe(24)}"
+
+
+def generate_file_id() -> str:
+    return f"FILE-{secrets.token_hex(6).upper()}"
+
+
+def hash_qr_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def build_trace_hash(*parts: object) -> str:
+    raw = "|".join("" if part is None else str(part) for part in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def pdf_escape(text: object) -> str:
+    value = "" if text is None else str(text)
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def build_simple_pdf(lines: list[str]) -> bytes:
+    content_lines = ["BT", "/F1 12 Tf", "50 780 Td"]
+    for index, line in enumerate(lines):
+        if index:
+            content_lines.append("0 -18 Td")
+        content_lines.append(f"({pdf_escape(line)}) Tj")
+    content_lines.append("ET")
+    stream = "\n".join(content_lines).encode("utf-8")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode("ascii"))
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode(
+            "ascii"
+        )
+    )
+    return bytes(pdf)
 
 
 def hash_password(password: str, salt: str) -> str:
@@ -779,6 +1148,7 @@ def normalize_event(row: sqlite3.Row) -> dict:
     item["event_id"] = item["id"]
     item["description"] = item["event_detail"]
     item["event_level"] = event_level(item["event_type"])
+    item["alarm_status"] = item.get("alarm_status") or "new"
     return item
 
 
@@ -867,15 +1237,39 @@ def get_trace_report_data(conn: sqlite3.Connection, task_id: str) -> dict:
         """,
         (task_id,),
     ).fetchall()
+    evidence_files = conn.execute(
+        """
+        SELECT * FROM files
+        WHERE task_id = ?
+        ORDER BY id DESC
+        LIMIT 100
+        """,
+        (task_id,),
+    ).fetchall()
 
     summary = row_to_dict(stats)
     summary["event_count"] = event_count
+    summary["evidence_count"] = len(evidence_files)
     task = enrich_task(task_row, conn)
+    evidence_items = [serialize_file(row) for row in evidence_files]
+    trace_hash = build_trace_hash(
+        task_id,
+        task.get("status"),
+        task.get("started_at"),
+        task.get("arrived_at"),
+        task.get("signed_at"),
+        task.get("rejected_at"),
+        event_count,
+        ",".join(item["sha256"] for item in evidence_items),
+    )
     return {
+        "report_version": "MVP-1",
+        "trace_hash": trace_hash,
         "task": task,
         "latest": normalize_telemetry(latest) if latest else None,
         "summary": summary,
         "events": [normalize_event(row) for row in events],
+        "evidence_files": evidence_items,
         "handoff_nodes": build_handoff_nodes(task),
     }
 
@@ -1100,6 +1494,13 @@ def register_user(payload: RegisterIn):
                 "SELECT * FROM users WHERE id = ?",
                 (cursor.lastrowid,),
             ).fetchone()
+            record_audit(
+                conn,
+                "auth.register",
+                user_id=row["id"],
+                resource_type="user",
+                resource_id=str(row["id"]),
+            )
     except sqlite3.IntegrityError:
         return api_error(409, 40902, "username already exists")
 
@@ -1119,6 +1520,8 @@ def login_user(payload: LoginIn):
         ).fetchone()
         if not row:
             return api_error(401, 40101, "invalid username or password")
+        if row["status"] and row["status"] != "active":
+            return api_error(403, 40302, "user disabled")
 
         password_hash = hash_password(payload.password, row["salt"])
         if not secrets.compare_digest(password_hash, row["password_hash"]):
@@ -1131,6 +1534,13 @@ def login_user(payload: LoginIn):
             VALUES (?, ?, ?)
             """,
             (token, row["id"], now_iso()),
+        )
+        record_audit(
+            conn,
+            "auth.login",
+            user_id=row["id"],
+            resource_type="user",
+            resource_id=str(row["id"]),
         )
 
     return api_success(
@@ -1174,6 +1584,8 @@ def logout_user(authorization: Optional[str] = Header(None)):
         return api_error(401, 40102, "unauthorized")
     with get_connection() as conn:
         cursor = conn.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
+        if cursor.rowcount:
+            record_audit(conn, "auth.logout", resource_type="auth_token")
     if cursor.rowcount == 0:
         return api_error(401, 40102, "unauthorized")
     return api_success({"logged_out": True}, "logout success")
@@ -1208,6 +1620,13 @@ def refresh_auth_token(authorization: Optional[str] = Header(None)):
             """,
             (new_token, row["id"], now_iso()),
         )
+        record_audit(
+            conn,
+            "auth.refresh",
+            user_id=row["id"],
+            resource_type="user",
+            resource_id=str(row["id"]),
+        )
 
     return api_success(
         {
@@ -1224,6 +1643,30 @@ def receive_v1_device_telemetry(payload: DeviceTelemetryIn):
     init_db()
     with get_connection() as conn:
         task = get_task_by_id(conn, payload.task_id)
+        if payload.sequence is not None:
+            existing = conn.execute(
+                """
+                SELECT * FROM device_data
+                WHERE device_id = ? AND sequence = ?
+                """,
+                (payload.device_id, payload.sequence),
+            ).fetchone()
+            if existing:
+                update_device_seen(
+                    conn,
+                    payload.device_id,
+                    payload.task_id,
+                    payload.battery,
+                    now_iso(),
+                )
+                return api_success(
+                    {
+                        "saved": 0,
+                        "duplicate": True,
+                        "items": [normalize_telemetry(existing)],
+                    },
+                    "telemetry duplicated",
+                )
         data = DeviceDataIn(
             device_id=payload.device_id,
             task_id=payload.task_id,
@@ -1246,6 +1689,13 @@ def receive_v1_device_telemetry(payload: DeviceTelemetryIn):
         )
         if error:
             return api_error(409, 40920, "device does not match task")
+        update_device_seen(
+            conn,
+            payload.device_id,
+            payload.task_id,
+            payload.battery,
+            row["timestamp"],
+        )
 
     return api_success(
         {
@@ -1285,8 +1735,244 @@ def receive_v1_device_heartbeat(payload: DeviceHeartbeatIn):
             "SELECT * FROM device_heartbeat WHERE id = ?",
             (cursor.lastrowid,),
         ).fetchone()
+        update_device_seen(
+            conn,
+            payload.device_id,
+            payload.task_id,
+            payload.battery,
+            timestamp,
+        )
 
     return api_success(row_to_dict(row), "heartbeat saved")
+
+
+@app.post("/api/v1/devices")
+def register_v1_device(
+    payload: RegisterDeviceIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] not in {"sender", "admin"}:
+        return api_error(403, 40301, "forbidden")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO devices (
+                device_id, device_name, model, status, current_task_id,
+                battery, last_seen_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                device_name = excluded.device_name,
+                model = excluded.model,
+                updated_at = excluded.updated_at
+            """,
+            (
+                payload.device_id,
+                payload.device_name,
+                payload.model,
+                "available",
+                None,
+                None,
+                None,
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM devices WHERE device_id = ?",
+            (payload.device_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "device.register",
+            user_id=user["user_id"],
+            resource_type="device",
+            resource_id=payload.device_id,
+        )
+    return api_success(serialize_device(row), "device registered")
+
+
+@app.get("/api/v1/devices")
+def list_v1_devices(
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM devices ORDER BY updated_at DESC"
+        ).fetchall()
+    return api_success({"items": [serialize_device(row) for row in rows]})
+
+
+@app.post("/api/v1/devices/{device_id}/bind")
+def bind_v1_device(
+    device_id: str,
+    payload: BindDeviceIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        task_row = get_task_by_id(conn, payload.task_id)
+        if not task_row:
+            return api_error(404, 40401, "task not found")
+        task = serialize_task(task_row)
+        if not can_modify_task(user, task):
+            return api_error(404, 40401, "task not found")
+
+        device = conn.execute(
+            "SELECT * FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if not device:
+            conn.execute(
+                """
+                INSERT INTO devices (
+                    device_id, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (device_id, "available", timestamp, timestamp),
+            )
+        else:
+            device_data = row_to_dict(device)
+            if (
+                device_data.get("current_task_id")
+                and device_data["current_task_id"] != payload.task_id
+            ):
+                return api_error(409, 40920, "device already bound")
+
+        conn.execute(
+            """
+            UPDATE device_bindings
+            SET status = ?, unbound_at = ?
+            WHERE device_id = ? AND status = ?
+            """,
+            ("unbound", timestamp, device_id, "bound"),
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO device_bindings (
+                device_id, task_id, bound_at, unbound_at, status
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (device_id, payload.task_id, timestamp, None, "bound"),
+        )
+        conn.execute(
+            """
+            UPDATE devices
+            SET status = ?, current_task_id = ?, updated_at = ?
+            WHERE device_id = ?
+            """,
+            ("bound", payload.task_id, timestamp, device_id),
+        )
+        conn.execute(
+            """
+            UPDATE task_handoff
+            SET device_id = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (device_id, timestamp, payload.task_id),
+        )
+        row = conn.execute(
+            "SELECT * FROM device_bindings WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "device.bind",
+            user_id=user["user_id"],
+            resource_type="device",
+            resource_id=device_id,
+            task_id=payload.task_id,
+        )
+    return api_success(serialize_binding(row), "device bound")
+
+
+@app.post("/api/v1/devices/{device_id}/unbind")
+def unbind_v1_device(
+    device_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] not in {"sender", "admin"}:
+        return api_error(403, 40301, "forbidden")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        device = conn.execute(
+            "SELECT * FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if not device:
+            return api_error(404, 40402, "device not found")
+        conn.execute(
+            """
+            UPDATE device_bindings
+            SET status = ?, unbound_at = ?
+            WHERE device_id = ? AND status = ?
+            """,
+            ("unbound", timestamp, device_id, "bound"),
+        )
+        conn.execute(
+            """
+            UPDATE devices
+            SET status = ?, current_task_id = NULL, updated_at = ?
+            WHERE device_id = ?
+            """,
+            ("available", timestamp, device_id),
+        )
+        row = conn.execute(
+            "SELECT * FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "device.unbind",
+            user_id=user["user_id"],
+            resource_type="device",
+            resource_id=device_id,
+        )
+    return api_success(serialize_device(row), "device unbound")
+
+
+@app.get("/api/v1/devices/{device_id}/bindings")
+def get_v1_device_bindings(
+    device_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM device_bindings
+            WHERE device_id = ?
+            ORDER BY id DESC
+            """,
+            (device_id,),
+        ).fetchall()
+    return api_success({"items": [serialize_binding(row) for row in rows]})
 
 
 @app.get("/api/v1/tasks")
@@ -1399,6 +2085,14 @@ def create_v1_task(
             "SELECT * FROM task_handoff WHERE rowid = ?",
             (cursor.lastrowid,),
         ).fetchone()
+        record_audit(
+            conn,
+            "task.create",
+            user_id=user["user_id"],
+            resource_type="task",
+            resource_id=task_id,
+            task_id=task_id,
+        )
     return api_success(enrich_task(row, conn), "task created")
 
 
@@ -1582,6 +2276,506 @@ def precheck_v1_task(
     return api_success(enrich_task(updated, conn), "task prechecked")
 
 
+@app.post("/api/v1/tasks/{task_id}/handoffs")
+def create_v1_handoff(
+    task_id: str,
+    payload: CreateHandoffIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    if payload.handoff_type not in {
+        "sender_to_carrier",
+        "carrier_to_carrier",
+        "carrier_to_receiver",
+    }:
+        return api_error(422, 42204, "invalid handoff type")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        task_row = get_task_by_id(conn, task_id)
+        if not task_row:
+            return api_error(404, 40401, "task not found")
+        task = serialize_task(task_row)
+        if not can_view_task(user, task):
+            return api_error(404, 40401, "task not found")
+        to_user = get_user_row(conn, payload.to_user_id)
+        if not to_user:
+            return api_error(404, 40404, "target user not found")
+        existing = conn.execute(
+            """
+            SELECT * FROM handoffs
+            WHERE task_id = ? AND status = ?
+            """,
+            (task_id, "pending"),
+        ).fetchone()
+        if existing:
+            return api_error(409, 40930, "handoff already pending")
+
+        handoff_id = generate_handoff_id()
+        cursor = conn.execute(
+            """
+            INSERT INTO handoffs (
+                handoff_id, task_id, handoff_type, from_user_id,
+                to_user_id, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                handoff_id,
+                task_id,
+                payload.handoff_type,
+                user["user_id"],
+                payload.to_user_id,
+                "pending",
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM handoffs WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "handoff.create",
+            user_id=user["user_id"],
+            resource_type="handoff",
+            resource_id=handoff_id,
+            task_id=task_id,
+        )
+    return api_success(serialize_handoff(row), "handoff created")
+
+
+@app.post("/api/v1/tasks/{task_id}/qr-tokens")
+def create_v1_qr_token(
+    task_id: str,
+    payload: CreateQrTokenIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    now = datetime.now(timezone.utc).astimezone()
+    created_at = now.isoformat(timespec="seconds")
+    expires_at_dt = now + timedelta(seconds=payload.ttl_seconds)
+    expires_at = expires_at_dt.isoformat(timespec="seconds")
+    token = generate_qr_token()
+    nonce = secrets.token_hex(12)
+
+    with get_connection() as conn:
+        task_row = get_task_by_id(conn, task_id)
+        if not task_row:
+            return api_error(404, 40401, "task not found")
+        if not can_view_task(user, serialize_task(task_row)):
+            return api_error(404, 40401, "task not found")
+        handoff = conn.execute(
+            """
+            SELECT * FROM handoffs
+            WHERE handoff_id = ? AND task_id = ?
+            """,
+            (payload.handoff_id, task_id),
+        ).fetchone()
+        if not handoff:
+            return api_error(404, 40405, "handoff not found")
+
+        cursor = conn.execute(
+            """
+            INSERT INTO qr_tokens (
+                token_hash, task_id, handoff_id, action, issuer_user_id,
+                nonce, status, expires_at, consumed_at, revoked_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                hash_qr_token(token),
+                task_id,
+                payload.handoff_id,
+                payload.action,
+                user["user_id"],
+                nonce,
+                "active",
+                expires_at,
+                None,
+                None,
+                created_at,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM qr_tokens WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "qr.create",
+            user_id=user["user_id"],
+            resource_type="qr_token",
+            resource_id=str(cursor.lastrowid),
+            task_id=task_id,
+        )
+
+    return api_success(
+        {
+            "token_id": row["id"],
+            "token": token,
+            "expires_at": row["expires_at"],
+            "refresh_after": min(45, max(1, payload.ttl_seconds - 15)),
+            "qr_payload": f"coldchain://handoff?token={token}",
+        },
+        "qr token created",
+    )
+
+
+@app.post("/api/v1/qr-tokens/verify")
+def verify_v1_qr_token(
+    payload: VerifyQrTokenIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    timestamp = now_iso()
+    token_hash = hash_qr_token(payload.token)
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM qr_tokens WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if not row:
+            return api_error(410, 41010, "qr token invalid")
+        qr = serialize_qr_token(row)
+        now_dt = datetime.now(timezone.utc).astimezone()
+        expires_at = datetime.fromisoformat(qr["expires_at"])
+        if (
+            qr["status"] != "active"
+            or qr.get("consumed_at")
+            or qr.get("revoked_at")
+            or expires_at < now_dt
+        ):
+            return api_error(410, 41010, "qr token expired or used")
+
+        conn.execute(
+            """
+            UPDATE qr_tokens
+            SET status = ?, consumed_at = ?
+            WHERE id = ?
+            """,
+            ("consumed", timestamp, qr["id"]),
+        )
+        record_audit(
+            conn,
+            "qr.verify",
+            user_id=user["user_id"],
+            resource_type="qr_token",
+            resource_id=str(qr["id"]),
+            task_id=qr["task_id"],
+        )
+
+    return api_success(
+        {
+            "valid": True,
+            "token_id": qr["id"],
+            "task_id": qr["task_id"],
+            "handoff_id": qr["handoff_id"],
+            "action": qr["action"],
+        },
+        "qr token verified",
+    )
+
+
+@app.post("/api/v1/qr-tokens/{token_id}/revoke")
+def revoke_v1_qr_token(
+    token_id: int,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    timestamp = now_iso()
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM qr_tokens WHERE id = ?",
+            (token_id,),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40406, "qr token not found")
+        qr = serialize_qr_token(row)
+        if qr["status"] != "active" or qr.get("consumed_at"):
+            return api_error(410, 41010, "qr token expired or used")
+        task_row = get_task_by_id(conn, qr["task_id"])
+        if not task_row or not can_view_task(user, serialize_task(task_row)):
+            return api_error(404, 40406, "qr token not found")
+        conn.execute(
+            """
+            UPDATE qr_tokens
+            SET status = ?, revoked_at = ?
+            WHERE id = ?
+            """,
+            ("revoked", timestamp, token_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM qr_tokens WHERE id = ?",
+            (token_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "qr.revoke",
+            user_id=user["user_id"],
+            resource_type="qr_token",
+            resource_id=str(token_id),
+            task_id=qr["task_id"],
+        )
+    return api_success(serialize_qr_token(updated), "qr token revoked")
+
+
+@app.post("/api/v1/files")
+def create_v1_file(
+    payload: CreateFileIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    timestamp = now_iso()
+
+    with get_connection() as conn:
+        task_row = get_task_by_id(conn, payload.task_id)
+        if not task_row:
+            return api_error(404, 40401, "task not found")
+        if not can_view_task(user, serialize_task(task_row)):
+            return api_error(404, 40401, "task not found")
+
+        file_id = generate_file_id()
+        cursor = conn.execute(
+            """
+            INSERT INTO files (
+                file_id, task_id, file_name, file_type, file_size,
+                sha256, usage, related_type, related_id, storage_url,
+                uploader_user_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                file_id,
+                payload.task_id,
+                payload.file_name,
+                payload.file_type,
+                payload.file_size,
+                payload.sha256.lower(),
+                payload.usage,
+                payload.related_type,
+                payload.related_id,
+                payload.storage_url,
+                user["user_id"],
+                timestamp,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM files WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "file.create",
+            user_id=user["user_id"],
+            resource_type="file",
+            resource_id=file_id,
+            task_id=payload.task_id,
+            detail=payload.usage,
+        )
+    return api_success(serialize_file(row), "file recorded")
+
+
+@app.get("/api/v1/files/{file_id}")
+def get_v1_file(
+    file_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM files WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40407, "file not found")
+        item = serialize_file(row)
+        task_row = get_task_by_id(conn, item["task_id"])
+        if not task_row or not can_view_task(user, serialize_task(task_row)):
+            return api_error(404, 40407, "file not found")
+
+    item["download_url"] = item["storage_url"] or f"local://files/{file_id}"
+    item["expires_in"] = 300
+    return api_success(item)
+
+
+@app.get("/api/v1/handoffs/{handoff_id}")
+def get_v1_handoff(
+    handoff_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?",
+            (handoff_id,),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40405, "handoff not found")
+        handoff = serialize_handoff(row)
+        task_row = get_task_by_id(conn, handoff["task_id"])
+        if not task_row or not can_view_task(user, serialize_task(task_row)):
+            return api_error(404, 40405, "handoff not found")
+    return api_success(handoff)
+
+
+@app.post("/api/v1/handoffs/{handoff_id}/confirm")
+def confirm_v1_handoff(
+    handoff_id: str,
+    payload: HandoffConfirmIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?",
+            (handoff_id,),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40405, "handoff not found")
+        handoff = serialize_handoff(row)
+        if handoff["status"] != "pending":
+            return api_error(409, 40931, "handoff state conflict")
+        if handoff["to_user_id"] != user["user_id"] and user["role"] != "admin":
+            return api_error(403, 40301, "forbidden")
+
+        certificate_no = f"HO-CERT-{handoff['id']:06d}"
+        trace_hash = build_trace_hash(
+            handoff["handoff_id"],
+            handoff["task_id"],
+            handoff["from_user_id"],
+            handoff["to_user_id"],
+            timestamp,
+        )
+        location = payload.location
+        conn.execute(
+            """
+            UPDATE handoffs
+            SET status = ?, location_lat = ?, location_lng = ?,
+                location_accuracy = ?, certificate_no = ?, trace_hash = ?,
+                confirmed_at = ?, updated_at = ?
+            WHERE handoff_id = ?
+            """,
+            (
+                "confirmed",
+                location.lat if location else None,
+                location.lng if location else None,
+                location.accuracy if location else None,
+                certificate_no,
+                trace_hash,
+                timestamp,
+                timestamp,
+                handoff_id,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE task_handoff
+            SET status = ?, started_at = COALESCE(started_at, ?),
+                updated_at = ?
+            WHERE task_id = ?
+            """,
+            ("in_transit", timestamp, timestamp, handoff["task_id"]),
+        )
+        updated = conn.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?",
+            (handoff_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "handoff.confirm",
+            user_id=user["user_id"],
+            resource_type="handoff",
+            resource_id=handoff_id,
+            task_id=handoff["task_id"],
+        )
+
+    result = serialize_handoff(updated)
+    result["task_status"] = "in_transit"
+    result["current_custodian"] = result["to_user_id"]
+    result["handoff_certificate_no"] = result["certificate_no"]
+    return api_success(result, "handoff confirmed")
+
+
+@app.post("/api/v1/handoffs/{handoff_id}/reject")
+def reject_v1_handoff(
+    handoff_id: str,
+    payload: HandoffRejectIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?",
+            (handoff_id,),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40405, "handoff not found")
+        handoff = serialize_handoff(row)
+        if handoff["status"] != "pending":
+            return api_error(409, 40931, "handoff state conflict")
+        if handoff["to_user_id"] != user["user_id"] and user["role"] != "admin":
+            return api_error(403, 40301, "forbidden")
+        conn.execute(
+            """
+            UPDATE handoffs
+            SET status = ?, reason = ?, rejected_at = ?, updated_at = ?
+            WHERE handoff_id = ?
+            """,
+            ("rejected", payload.reason, timestamp, timestamp, handoff_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?",
+            (handoff_id,),
+        ).fetchone()
+        record_audit(
+            conn,
+            "handoff.reject",
+            user_id=user["user_id"],
+            resource_type="handoff",
+            resource_id=handoff_id,
+            task_id=handoff["task_id"],
+            detail=payload.reason,
+        )
+    return api_success(serialize_handoff(updated), "handoff rejected")
+
+
 @app.get("/api/v1/tasks/{task_id}/telemetry/latest")
 def get_v1_latest_telemetry(task_id: str):
     init_db()
@@ -1649,6 +2843,230 @@ def get_v1_alarms(
     )
 
 
+@app.post("/api/v1/alarms/{alarm_id}/ack")
+def ack_v1_alarm(alarm_id: int):
+    init_db()
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM event_log WHERE id = ?",
+            (alarm_id,),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40403, "alarm not found")
+        conn.execute(
+            """
+            UPDATE event_log
+            SET alarm_status = ?, acknowledged_at = ?
+            WHERE id = ?
+            """,
+            ("acknowledged", timestamp, alarm_id),
+        )
+        record_audit(
+            conn,
+            "alarm.ack",
+            resource_type="alarm",
+            resource_id=str(alarm_id),
+            task_id=row["task_id"],
+        )
+        updated = conn.execute(
+            "SELECT * FROM event_log WHERE id = ?",
+            (alarm_id,),
+        ).fetchone()
+    return api_success(normalize_event(updated), "alarm acknowledged")
+
+
+@app.post("/api/v1/alarms/{alarm_id}/resolve")
+def resolve_v1_alarm(alarm_id: int, payload: ResolveAlarmIn):
+    init_db()
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM event_log WHERE id = ?",
+            (alarm_id,),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40403, "alarm not found")
+        conn.execute(
+            """
+            UPDATE event_log
+            SET alarm_status = ?, acknowledged_at = COALESCE(acknowledged_at, ?),
+                resolved_at = ?, resolution = ?
+            WHERE id = ?
+            """,
+            ("resolved", timestamp, timestamp, payload.resolution, alarm_id),
+        )
+        record_audit(
+            conn,
+            "alarm.resolve",
+            resource_type="alarm",
+            resource_id=str(alarm_id),
+            task_id=row["task_id"],
+        )
+        updated = conn.execute(
+            "SELECT * FROM event_log WHERE id = ?",
+            (alarm_id,),
+        ).fetchone()
+    return api_success(normalize_event(updated), "alarm resolved")
+
+
+@app.get("/api/v1/admin/audit-logs")
+def list_v1_audit_logs(
+    authorization: Optional[str] = Header(None),
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] != "admin":
+        return api_error(403, 40301, "forbidden")
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM audit_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return api_success({"limit": limit, "items": [serialize_audit_log(row) for row in rows]})
+
+
+@app.get("/api/v1/admin/users")
+def list_v1_admin_users(
+    authorization: Optional[str] = Header(None),
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] != "admin":
+        return api_error(403, 40301, "forbidden")
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM users ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return api_success({"limit": limit, "items": [serialize_user(row) for row in rows]})
+
+
+@app.patch("/api/v1/admin/users/{user_id}/status")
+def update_v1_admin_user_status(
+    user_id: int,
+    payload: UpdateUserStatusIn,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] != "admin":
+        return api_error(403, 40301, "forbidden")
+    status = payload.status.strip().lower()
+    if status not in {"active", "disabled"}:
+        return api_error(422, 42205, "invalid user status")
+    with get_connection() as conn:
+        row = get_user_row(conn, user_id)
+        if not row:
+            return api_error(404, 40404, "user not found")
+        conn.execute(
+            "UPDATE users SET status = ? WHERE id = ?",
+            (status, user_id),
+        )
+        if status != "active":
+            conn.execute("DELETE FROM auth_tokens WHERE user_id = ?", (user_id,))
+        updated = get_user_row(conn, user_id)
+        record_audit(
+            conn,
+            "admin.user_status",
+            user_id=user["user_id"],
+            resource_type="user",
+            resource_id=str(user_id),
+            detail=status,
+        )
+    return api_success(serialize_user(updated), "user status updated")
+
+
+@app.get("/api/v1/admin/tasks")
+def list_v1_admin_tasks(
+    authorization: Optional[str] = Header(None),
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    if user["role"] != "admin":
+        return api_error(403, 40301, "forbidden")
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM task_handoff ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        items = [enrich_task(row, conn) for row in rows]
+    return api_success({"limit": limit, "items": items})
+
+
+@app.get("/api/v1/notifications")
+def list_v1_notifications(
+    authorization: Optional[str] = Header(None),
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM notifications
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (user["user_id"], limit),
+        ).fetchall()
+    return api_success({"limit": limit, "items": [serialize_notification(row) for row in rows]})
+
+
+@app.post("/api/v1/notifications/{notification_id}/read")
+def read_v1_notification(
+    notification_id: int,
+    authorization: Optional[str] = Header(None),
+):
+    init_db()
+    user = require_user(authorization)
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    timestamp = now_iso()
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM notifications
+            WHERE id = ? AND user_id = ?
+            """,
+            (notification_id, user["user_id"]),
+        ).fetchone()
+        if not row:
+            return api_error(404, 40408, "notification not found")
+        conn.execute(
+            """
+            UPDATE notifications
+            SET is_read = ?, read_at = COALESCE(read_at, ?)
+            WHERE id = ?
+            """,
+            (1, timestamp, notification_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM notifications WHERE id = ?",
+            (notification_id,),
+        ).fetchone()
+    return api_success(serialize_notification(updated), "notification read")
+
+
 def task_state_conflict():
     return api_error(409, 40901, "task state conflict")
 
@@ -1676,6 +3094,13 @@ def start_v1_task(task_id: str):
             """,
             ("in_transit", timestamp, timestamp, task_id),
         )
+        record_audit(
+            conn,
+            "task.start",
+            resource_type="task",
+            resource_id=task_id,
+            task_id=task_id,
+        )
         updated = get_task_by_id(conn, task_id)
     return api_success(enrich_task(updated, conn), "task started")
 
@@ -1698,6 +3123,13 @@ def arrive_v1_task(task_id: str):
             """,
             ("arrived", timestamp, timestamp, task_id),
         )
+        record_audit(
+            conn,
+            "task.arrive",
+            resource_type="task",
+            resource_id=task_id,
+            task_id=task_id,
+        )
         updated = get_task_by_id(conn, task_id)
     return api_success(enrich_task(updated, conn), "task arrived")
 
@@ -1719,6 +3151,13 @@ def sign_v1_task(task_id: str):
             WHERE task_id = ?
             """,
             ("signed", timestamp, timestamp, task_id),
+        )
+        record_audit(
+            conn,
+            "task.sign",
+            resource_type="task",
+            resource_id=task_id,
+            task_id=task_id,
         )
         updated = get_task_by_id(conn, task_id)
     return api_success(enrich_task(updated, conn), "task signed")
@@ -1747,6 +3186,14 @@ def reject_v1_task(task_id: str, data: RejectTaskIn):
             """,
             ("rejected", timestamp, reason, timestamp, task_id),
         )
+        record_audit(
+            conn,
+            "task.reject",
+            resource_type="task",
+            resource_id=task_id,
+            task_id=task_id,
+            detail=reason,
+        )
         updated = get_task_by_id(conn, task_id)
     return api_success(enrich_task(updated, conn), "task rejected")
 
@@ -1759,6 +3206,35 @@ def get_v1_trace_report(task_id: str):
     if not report:
         return api_error(404, 40401, "task not found")
     return api_success(report)
+
+
+@app.get("/api/v1/tasks/{task_id}/trace-report.pdf")
+def get_v1_trace_report_pdf(task_id: str):
+    init_db()
+    with get_connection() as conn:
+        report = get_trace_report_data(conn, task_id)
+    if not report:
+        return api_error(404, 40401, "task not found")
+
+    task = report["task"]
+    summary = report["summary"]
+    lines = [
+        "Cold Chain Traceability Report",
+        f"Task ID: {task['task_id']}",
+        f"Sample: {task['sample_name']}",
+        f"Status: {task['status']}",
+        f"Device: {task.get('device_id')}",
+        f"Records: {summary.get('total_records')}",
+        f"Events: {summary.get('event_count')}",
+        f"Evidence Files: {summary.get('evidence_count')}",
+        f"Trace Hash: {report.get('trace_hash')}",
+    ]
+    content = build_simple_pdf(lines)
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{task_id}-trace-report.pdf"'},
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
