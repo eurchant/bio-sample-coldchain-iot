@@ -64,6 +64,9 @@ def test_post_latest_history_and_events():
     history = client.get("/api/device/history")
     assert history.status_code == 200
     assert len(history.json()) == 2
+    assert history.json()[0]["event_type"] == "SEVERE"
+    assert history.json()[0]["event_display"] == "温度异常"
+    assert history.json()[1]["event_display"] == "正常"
 
     events = client.get("/api/device/events")
     assert events.status_code == 200
@@ -156,6 +159,84 @@ def test_v1_contract_and_task_queries_use_unified_response():
         "message": "task not found",
         "data": None,
     }
+
+
+def test_v1_auth_register_login_me_and_logout():
+    register = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "receiver_demo",
+            "password": "receiver123",
+            "role": "receiver",
+            "display_name": "接收方演示账号",
+        },
+    )
+
+    assert register.status_code == 200
+    registered_user = register.json()["data"]["user"]
+    assert registered_user == {
+        "user_id": 1,
+        "username": "receiver_demo",
+        "role": "receiver",
+        "display_name": "接收方演示账号",
+    }
+    assert "password" not in register.text
+
+    duplicate = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "receiver_demo",
+            "password": "receiver123",
+            "role": "receiver",
+        },
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == 40902
+
+    bad_login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "receiver_demo", "password": "wrong-password"},
+    )
+    assert bad_login.status_code == 401
+    assert bad_login.json()["code"] == 40101
+
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "receiver_demo", "password": "receiver123"},
+    )
+    assert login.status_code == 200
+    login_data = login.json()["data"]
+    assert login_data["token"]
+    assert login_data["user"]["username"] == "receiver_demo"
+    assert "password" not in login.text
+
+    me = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {login_data['token']}"},
+    )
+    assert me.status_code == 200
+    assert me.json()["data"]["username"] == "receiver_demo"
+    assert me.json()["data"]["role"] == "receiver"
+
+    permissions = client.get(
+        "/api/v1/auth/permissions",
+        headers={"Authorization": f"Bearer {login_data['token']}"},
+    )
+    assert permissions.status_code == 200
+    assert "sign_task" in permissions.json()["data"]["permissions"]
+
+    logout = client.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {login_data['token']}"},
+    )
+    assert logout.status_code == 200
+    assert logout.json()["data"]["logged_out"] is True
+
+    expired_me = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {login_data['token']}"},
+    )
+    assert expired_me.status_code == 401
 
 
 def test_v1_task_identifies_assigned_device():

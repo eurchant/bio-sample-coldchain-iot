@@ -22,19 +22,21 @@ TEMP_HIGH = 30
 # 你的光敏规律：暗处 raw 高，亮处 raw 低
 # 正常室内大约 18000~25000
 # 遮住/关灯大约 59000~60000
-# 所以 raw < 40000 判定为开箱，raw >= 40000 判定为关闭
-OPEN_THRESHOLD = 40000
+# 当前弱光开箱环境实测 raw 约 49800~50000。
+# 所以阈值调高：raw < 53000 判定为开箱，raw >= 53000 判定为关闭。
+OPEN_THRESHOLD = 53000
 
 # 加速度阈值
 # 静止时 acc_total 大约 9.8
-FREE_FALL_THRESHOLD = 7.0       # 明显小于 9.8，疑似自由落体
-IMPACT_ACC_THRESHOLD = 16.0     # 明显大于 9.8，疑似冲击
+FREE_FALL_THRESHOLD = 4.5       # 明显接近失重，疑似自由落体
+FREE_FALL_HIT_COUNT = 2         # 5 次采样中至少 2 次低于阈值才判定 DROP
+IMPACT_ACC_THRESHOLD = 30.0     # 明显大于 9.8，疑似撞击/冲击
 
 # 运动分级阈值
 # 当前版本避免静止误判 MILD
-MILD_DELTA = 0.80       # 轻微晃动
-SEVERE_DELTA = 2.50     # 剧烈晃动
-IMPACT_DELTA = 6.00     # 猛烈撞击/冲击
+MILD_DELTA = 2.00       # 轻微晃动：轻碰、轻拿起
+SEVERE_DELTA = 9.00     # 剧烈晃动：明显连续摇晃
+IMPACT_DELTA = 28.00    # 猛烈撞击/冲击：快速撞击或用力甩动
 
 # 每轮循环间隔
 LOOP_DELAY = 0.10
@@ -146,7 +148,12 @@ def get_move_status():
     # 3. 剧烈晃动
     # 4. 轻微晃动
     # 5. 稳定
-    if min_acc_total < FREE_FALL_THRESHOLD:
+    free_fall_hits = 0
+    for acc_total in acc_total_list:
+        if acc_total < FREE_FALL_THRESHOLD:
+            free_fall_hits += 1
+
+    if free_fall_hits >= FREE_FALL_HIT_COUNT:
         move_status = "FREE_FALL"
     elif max_acc_total > IMPACT_ACC_THRESHOLD or motion_delta >= IMPACT_DELTA:
         move_status = "IMPACT"
@@ -180,10 +187,22 @@ def draw_screen(temp, humi, light_raw, box_status, move_status, temp_status, mot
         box_color = lcd.GREEN
 
     if move_status == "STABLE":
+        move_text = "SAFE"
         move_color = lcd.GREEN
     elif move_status == "MILD":
+        move_text = "LIGHT"
         move_color = lcd.YELLOW
+    elif move_status == "SEVERE":
+        move_text = "HEAVY"
+        move_color = lcd.YELLOW
+    elif move_status == "IMPACT":
+        move_text = "HIT"
+        move_color = lcd.RED
+    elif move_status == "FREE_FALL":
+        move_text = "DROP"
+        move_color = lcd.RED
     else:
+        move_text = move_status
         move_color = lcd.RED
 
     if temp_status == "TEMP_ALERT":
@@ -194,7 +213,7 @@ def draw_screen(temp, humi, light_raw, box_status, move_status, temp_status, mot
         temp_color = lcd.GREEN
 
     lcd.show_string(0, 70, "Box: " + box_text, box_color, lcd.BLACK, 16)
-    lcd.show_string(0, 90, "Move: " + move_status, move_color, lcd.BLACK, 16)
+    lcd.show_string(0, 90, "Move: " + move_text, move_color, lcd.BLACK, 16)
     lcd.show_string(0, 110, "Temp: " + temp_text, temp_color, lcd.BLACK, 16)
 
     lcd.flush()

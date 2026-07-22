@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import hashlib
 import os
+import secrets
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -59,6 +61,33 @@ EVENT_LEVELS = {
     "MILD": "low",
 }
 
+EVENT_DISPLAY_LABELS = {
+    "NORMAL": "正常",
+    "BOX_OPEN": "开箱事件",
+    "MILD": "轻微晃动",
+    "SEVERE": "剧烈晃动",
+    "IMPACT": "疑似碰撞",
+    "FREE_FALL": "疑似跌落",
+    "TEMP_ALERT": "温度异常",
+}
+
+AUTH_ROLES = ["admin", "sender", "carrier", "receiver"]
+ROLE_PERMISSIONS = {
+    "admin": [
+        "view_task",
+        "start_task",
+        "sign_task",
+        "reject_task",
+        "view_report",
+        "view_alarm",
+        "upload_location",
+        "manage_user",
+    ],
+    "sender": ["view_task", "start_task", "view_report"],
+    "carrier": ["view_task", "view_alarm", "upload_location"],
+    "receiver": ["view_task", "sign_task", "reject_task", "view_report"],
+}
+
 
 class DeviceDataIn(BaseModel):
     device_id: str = Field(..., examples=["CLD-001"])
@@ -76,6 +105,18 @@ class DeviceDataIn(BaseModel):
 
 class RejectTaskIn(BaseModel):
     reason: str = Field(..., min_length=1, max_length=200)
+
+
+class RegisterIn(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=6, max_length=80)
+    role: str = Field(..., examples=["receiver"])
+    display_name: Optional[str] = Field(None, max_length=80)
+
+
+class LoginIn(BaseModel):
+    username: str = Field(..., min_length=1, max_length=40)
+    password: str = Field(..., min_length=1, max_length=80)
 
 
 def now_iso() -> str:
@@ -145,6 +186,29 @@ def init_db() -> None:
                 event_detail TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                role TEXT NOT NULL,
+                display_name TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
             )
             """
         )
@@ -352,6 +416,44 @@ def api_error(status_code: int, code: int, message: str) -> JSONResponse:
     )
 
 
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def serialize_user(row: sqlite3.Row) -> dict:
+    return {
+        "user_id": row["id"],
+        "username": row["username"],
+        "role": row["role"],
+        "display_name": row["display_name"] or row["username"],
+    }
+
+
+def bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    return token
+
+
+def current_user_from_token(token: Optional[str]) -> Optional[dict]:
+    if not token:
+        return None
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT users.*
+            FROM auth_tokens
+            JOIN users ON users.id = auth_tokens.user_id
+            WHERE auth_tokens.token = ?
+            """,
+            (token,),
+        ).fetchone()
+    return serialize_user(row) if row else None
+
+
 def canonical_task_status(task: dict) -> str:
     if task.get("rejected_at") or task.get("rejection_reason"):
         return "rejected"
@@ -389,16 +491,34 @@ def normalize_telemetry(row: sqlite3.Row) -> dict:
     item = row_to_dict(row)
     box_status = item["box_status"].upper()
     temp_status = item["temp_status"].upper()
+    move_status = item["move_status"].upper()
     item["box_status"] = {
         "CLOSED": "BOX_CLOSED",
         "OPEN": "BOX_OPEN",
     }.get(box_status, box_status)
-    item["move_status"] = item["move_status"].upper()
+    item["move_status"] = move_status
     item["temp_status"] = {
         "NORMAL": "TEMP_OK",
         "OK": "TEMP_OK",
     }.get(temp_status, temp_status)
+    item["event_display"] = telemetry_event_display(item)
     return item
+
+
+def telemetry_event_display(item: dict) -> str:
+    if item["temp_status"] == "TEMP_ALERT":
+        return EVENT_DISPLAY_LABELS["TEMP_ALERT"]
+    if item["move_status"] == "FREE_FALL":
+        return EVENT_DISPLAY_LABELS["FREE_FALL"]
+    if item["move_status"] == "IMPACT":
+        return EVENT_DISPLAY_LABELS["IMPACT"]
+    if item["move_status"] == "SEVERE":
+        return EVENT_DISPLAY_LABELS["SEVERE"]
+    if item["move_status"] == "MILD":
+        return EVENT_DISPLAY_LABELS["MILD"]
+    if item["box_status"] == "BOX_OPEN":
+        return EVENT_DISPLAY_LABELS["BOX_OPEN"]
+    return EVENT_DISPLAY_LABELS.get(item["event_type"], item["event_type"])
 
 
 def event_level(event_type: str) -> str:
@@ -712,10 +832,122 @@ def get_v1_contracts() -> dict:
             "box_statuses": BOX_STATUSES,
             "move_statuses": MOVE_STATUSES,
             "temperature_statuses": TEMPERATURE_STATUSES,
+            "auth_roles": AUTH_ROLES,
+            "role_permissions": ROLE_PERMISSIONS,
             "timestamp_format": "ISO 8601",
             "field_naming": "snake_case",
         }
     )
+
+
+@app.post("/api/v1/auth/register")
+def register_user(payload: RegisterIn):
+    init_db()
+    role = payload.role.strip().lower()
+    if role not in AUTH_ROLES:
+        return api_error(422, 42202, "invalid role")
+
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(payload.password, salt)
+    display_name = payload.display_name or payload.username
+    created_at = now_iso()
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, salt, role, display_name, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.username,
+                    password_hash,
+                    salt,
+                    role,
+                    display_name,
+                    created_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+    except sqlite3.IntegrityError:
+        return api_error(409, 40902, "username already exists")
+
+    return api_success({"user": serialize_user(row)}, "registered")
+
+
+@app.post("/api/v1/auth/login")
+def login_user(payload: LoginIn):
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (payload.username,),
+        ).fetchone()
+        if not row:
+            return api_error(401, 40101, "invalid username or password")
+
+        password_hash = hash_password(payload.password, row["salt"])
+        if not secrets.compare_digest(password_hash, row["password_hash"]):
+            return api_error(401, 40101, "invalid username or password")
+
+        token = secrets.token_urlsafe(32)
+        conn.execute(
+            """
+            INSERT INTO auth_tokens (token, user_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (token, row["id"], now_iso()),
+        )
+
+    return api_success(
+        {
+            "token": token,
+            "token_type": "bearer",
+            "user": serialize_user(row),
+        },
+        "login success",
+    )
+
+
+@app.get("/api/v1/auth/me")
+def get_auth_me(authorization: Optional[str] = Header(None)):
+    init_db()
+    user = current_user_from_token(bearer_token(authorization))
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    return api_success(user)
+
+
+@app.get("/api/v1/auth/permissions")
+def get_auth_permissions(authorization: Optional[str] = Header(None)):
+    init_db()
+    user = current_user_from_token(bearer_token(authorization))
+    if not user:
+        return api_error(401, 40102, "unauthorized")
+    return api_success(
+        {
+            "role": user["role"],
+            "permissions": ROLE_PERMISSIONS.get(user["role"], []),
+        }
+    )
+
+
+@app.post("/api/v1/auth/logout")
+def logout_user(authorization: Optional[str] = Header(None)):
+    init_db()
+    token = bearer_token(authorization)
+    if not token:
+        return api_error(401, 40102, "unauthorized")
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
+    if cursor.rowcount == 0:
+        return api_error(401, 40102, "unauthorized")
+    return api_success({"logged_out": True}, "logout success")
 
 
 @app.get("/api/v1/tasks/{task_id}")
@@ -1074,7 +1306,7 @@ def dashboard() -> str:
           <td>${item.box_status}</td>
           <td>${item.move_status}</td>
           <td>${item.temp_status}</td>
-          <td class="${item.event_type === "NORMAL" ? "" : "event"}">${item.event_type}</td>
+          <td class="${item.event_type === "NORMAL" ? "" : "event"}">${item.event_display || item.event_type}</td>
         </tr>
       `).join("");
     }

@@ -62,23 +62,24 @@ TEMP_HIGH = 30
 
 # 光敏规律：
 # 暗处 raw 高，亮处 raw 低
-# raw 低：有光进入，开箱
-# raw 高：遮光/关灯，关闭
-OPEN_THRESHOLD = 40000
+# 当前弱光开箱环境实测 raw 约 49800~50000。
+# raw 低：有光进入，开箱；raw 高：遮光/关灯，关闭。
+OPEN_THRESHOLD = 53000
 
 # 开箱判断加入迟滞，避免临界值附近来回跳
-BOX_OPEN_THRESHOLD = 35000
-BOX_CLOSE_THRESHOLD = 45000
+BOX_OPEN_THRESHOLD = 52000
+BOX_CLOSE_THRESHOLD = 56000
 
 # 加速度阈值
-FREE_FALL_THRESHOLD = 6.5
-IMPACT_ACC_THRESHOLD = 18.0
+FREE_FALL_THRESHOLD = 4.5
+FREE_FALL_HIT_COUNT = 2
+IMPACT_ACC_THRESHOLD = 30.0
 
 # 运动阈值，使用欧氏变化量
-# 这组比之前更稳，轻微动作不容易直接变 SEVERE
-MILD_DELTA = 1.40
-SEVERE_DELTA = 4.50
-IMPACT_DELTA = 9.00
+# 与本地演示版一致：轻晃、明显摇晃、冲击之间界限更清楚
+MILD_DELTA = 2.00
+SEVERE_DELTA = 9.00
+IMPACT_DELTA = 28.00
 
 # 加速度采样参数
 SAMPLE_COUNT = 5
@@ -166,9 +167,9 @@ def get_temp_status(temp):
 def get_box_status(light_raw):
     """
     开箱状态迟滞判断：
-    - light_raw < 35000：明确开箱
-    - light_raw > 45000：明确关闭
-    - 35000~45000：保持上一次状态
+    - light_raw < 52000：明确开箱
+    - light_raw > 56000：明确关闭
+    - 52000~56000：保持上一次状态
     """
 
     global box_status_cache
@@ -264,7 +265,12 @@ def get_move_status_raw():
     min_acc_total = min(acc_total_list)
     max_acc_total = max(acc_total_list)
 
-    if min_acc_total < FREE_FALL_THRESHOLD:
+    free_fall_hits = 0
+    for acc_total in acc_total_list:
+        if acc_total < FREE_FALL_THRESHOLD:
+            free_fall_hits += 1
+
+    if free_fall_hits >= FREE_FALL_HIT_COUNT:
         move_status = "FREE_FALL"
     elif max_acc_total > IMPACT_ACC_THRESHOLD or motion_score >= IMPACT_DELTA:
         move_status = "IMPACT"
@@ -336,12 +342,22 @@ def draw_screen(temp, humi, light_raw, box_status, move_status, temp_status, mot
         box_color = lcd.GREEN
 
     if move_status == "STABLE":
+        move_text = "SAFE"
         move_color = lcd.GREEN
     elif move_status == "MILD":
+        move_text = "LIGHT"
         move_color = lcd.YELLOW
     elif move_status == "SEVERE":
+        move_text = "HEAVY"
         move_color = lcd.YELLOW
+    elif move_status == "IMPACT":
+        move_text = "HIT"
+        move_color = lcd.RED
+    elif move_status == "FREE_FALL":
+        move_text = "DROP"
+        move_color = lcd.RED
     else:
+        move_text = move_status
         move_color = lcd.RED
 
     if temp_status == "TEMP_ALERT":
@@ -352,7 +368,7 @@ def draw_screen(temp, humi, light_raw, box_status, move_status, temp_status, mot
         temp_color = lcd.GREEN
 
     lcd.show_string(0, 70, "Box: " + box_text, box_color, lcd.BLACK, 16)
-    lcd.show_string(0, 90, "Move: " + move_status, move_color, lcd.BLACK, 16)
+    lcd.show_string(0, 90, "Move: " + move_text, move_color, lcd.BLACK, 16)
     lcd.show_string(0, 110, "Temp: " + temp_text, temp_color, lcd.BLACK, 16)
 
     if uploading:
