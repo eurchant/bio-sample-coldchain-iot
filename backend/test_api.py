@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 
 os.environ["DATABASE_PATH"] = tempfile.NamedTemporaryFile(delete=False).name
@@ -236,6 +237,42 @@ def test_v1_auth_register_login_me_and_logout():
         headers={"Authorization": f"Bearer {login_data['token']}"},
     )
     assert expired_me.status_code == 401
+
+
+def test_v1_auth_stores_pbkdf2_password_and_hashed_token():
+    register = client.post(
+        "/api/v1/auth/register",
+        json={
+            "phone": "secure_user",
+            "name": "安全测试用户",
+            "organization": "高校实验室",
+            "password": "secure123",
+            "role": "sender",
+        },
+    )
+    assert register.status_code == 200
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"phone": "secure_user", "password": "secure123"},
+    )
+    assert login.status_code == 200
+    token = login.json()["data"]["token"]
+
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        user_row = conn.execute(
+            "SELECT * FROM users WHERE username = ?",
+            ("secure_user",),
+        ).fetchone()
+        token_row = conn.execute("SELECT * FROM auth_tokens").fetchone()
+
+    assert user_row["password_hash"].startswith("pbkdf2_sha256$")
+    assert "secure123" not in user_row["password_hash"]
+    assert token_row["token"] != token
+    assert len(token_row["token"]) == 64
+
+    me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
 
 
 def test_v1_auth_refresh_rotates_token():
@@ -633,6 +670,20 @@ def test_v1_trace_report_includes_handoff_nodes():
     nodes = response.json()["data"]["handoff_nodes"]
     assert [node["type"] for node in nodes] == ["started", "signed"]
     assert all(node["timestamp"] for node in nodes)
+
+
+def test_v1_trace_report_includes_task_status_history():
+    assert client.post("/api/v1/tasks/TASK-001/start").status_code == 200
+    assert client.post("/api/v1/tasks/TASK-001/arrive").status_code == 200
+    assert client.post("/api/v1/tasks/TASK-001/sign").status_code == 200
+
+    response = client.get("/api/v1/tasks/TASK-001/trace-report")
+
+    assert response.status_code == 200
+    history = response.json()["data"]["status_history"]
+    statuses = [item["to_status"] for item in history]
+    assert statuses[-3:] == ["in_transit", "arrived", "signed"]
+    assert all(item["changed_at"] for item in history)
 
 
 def test_v1_device_telemetry_accepts_official_upload_format():

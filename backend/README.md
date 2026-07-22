@@ -490,3 +490,18 @@ python -m pytest test_api.py -v
 ```
 
 任务不存在返回 HTTP 404；状态不允许操作返回 HTTP 409。前端应判断 HTTP 状态码和 `code`，不要通过中文提示文字判断业务状态。
+
+## 安全与追溯增强
+
+当前后端已完成以下安全加固：
+
+- 新注册用户密码使用 PBKDF2-SHA256 加盐哈希。
+- 旧版 SHA-256 密码哈希账号仍可登录，登录成功后会自动升级为 PBKDF2。
+- 登录 Token 只保存 SHA-256 哈希，不在数据库中保存明文 Token。
+- 用户被管理员停用后，已有 Token 会被撤销。
+
+当前后端已增加状态历史：
+
+- 新增 `task_status_history`。
+- 创建、预检、发出、到达、签收、拒收、取消和交接确认会写入状态历史。
+- `/api/v1/tasks/{task_id}/trace-report` 会返回 `status_history`，用于追溯任务状态变化。

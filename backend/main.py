@@ -470,6 +470,19 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_status_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                from_status TEXT,
+                to_status TEXT NOT NULL,
+                reason TEXT,
+                actor_user_id INTEGER,
+                changed_at TEXT NOT NULL
+            )
+            """
+        )
         ensure_column(conn, "device_data", "sequence", "INTEGER")
         ensure_column(conn, "device_data", "battery", "INTEGER")
         ensure_column(conn, "device_data", "lat", "REAL")
@@ -861,6 +874,10 @@ def serialize_notification(row: sqlite3.Row) -> dict:
     return item
 
 
+def serialize_status_history(row: sqlite3.Row) -> dict:
+    return row_to_dict(row)
+
+
 def record_audit(
     conn: sqlite3.Connection,
     action: str,
@@ -914,6 +931,26 @@ def create_notification(
     )
 
 
+def record_status_history(
+    conn: sqlite3.Connection,
+    task_id: str,
+    from_status: Optional[str],
+    to_status: str,
+    reason: Optional[str] = None,
+    actor_user_id: Optional[int] = None,
+    changed_at: Optional[str] = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO task_status_history (
+            task_id, from_status, to_status, reason, actor_user_id, changed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (task_id, from_status, to_status, reason, actor_user_id, changed_at or now_iso()),
+    )
+
+
 def generate_handoff_id() -> str:
     return f"HO-{secrets.token_hex(6).upper()}"
 
@@ -926,8 +963,12 @@ def generate_file_id() -> str:
     return f"FILE-{secrets.token_hex(6).upper()}"
 
 
-def hash_qr_token(token: str) -> str:
+def hash_token_value(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def hash_qr_token(token: str) -> str:
+    return hash_token_value(token)
 
 
 def build_trace_hash(*parts: object) -> str:
@@ -976,7 +1017,34 @@ def build_simple_pdf(lines: list[str]) -> bytes:
 
 
 def hash_password(password: str, salt: str) -> str:
+    iterations = 210_000
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return f"pbkdf2_sha256${iterations}${digest}"
+
+
+def legacy_hash_password(password: str, salt: str) -> str:
     return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def verify_password(password: str, salt: str, stored_hash: str) -> bool:
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, digest = stored_hash.split("$", 2)
+            calculated = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations),
+            ).hex()
+        except (ValueError, TypeError):
+            return False
+        return secrets.compare_digest(calculated, digest)
+    return secrets.compare_digest(legacy_hash_password(password, salt), stored_hash)
 
 
 def serialize_user(row: sqlite3.Row) -> dict:
@@ -1004,15 +1072,16 @@ def bearer_token(authorization: Optional[str]) -> Optional[str]:
 def current_user_from_token(token: Optional[str]) -> Optional[dict]:
     if not token:
         return None
+    token_hash = hash_token_value(token)
     with get_connection() as conn:
         row = conn.execute(
             """
             SELECT users.*
             FROM auth_tokens
             JOIN users ON users.id = auth_tokens.user_id
-            WHERE auth_tokens.token = ?
+            WHERE auth_tokens.token = ? OR auth_tokens.token = ?
             """,
-            (token,),
+            (token_hash, token),
         ).fetchone()
     return serialize_user(row) if row else None
 
@@ -1246,6 +1315,14 @@ def get_trace_report_data(conn: sqlite3.Connection, task_id: str) -> dict:
         """,
         (task_id,),
     ).fetchall()
+    status_history = conn.execute(
+        """
+        SELECT * FROM task_status_history
+        WHERE task_id = ?
+        ORDER BY id ASC
+        """,
+        (task_id,),
+    ).fetchall()
 
     summary = row_to_dict(stats)
     summary["event_count"] = event_count
@@ -1270,6 +1347,7 @@ def get_trace_report_data(conn: sqlite3.Connection, task_id: str) -> dict:
         "summary": summary,
         "events": [normalize_event(row) for row in events],
         "evidence_files": evidence_items,
+        "status_history": [serialize_status_history(row) for row in status_history],
         "handoff_nodes": build_handoff_nodes(task),
     }
 
@@ -1523,17 +1601,22 @@ def login_user(payload: LoginIn):
         if row["status"] and row["status"] != "active":
             return api_error(403, 40302, "user disabled")
 
-        password_hash = hash_password(payload.password, row["salt"])
-        if not secrets.compare_digest(password_hash, row["password_hash"]):
+        if not verify_password(payload.password, row["salt"], row["password_hash"]):
             return api_error(401, 40101, "invalid username or password")
+        if not row["password_hash"].startswith("pbkdf2_sha256$"):
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (hash_password(payload.password, row["salt"]), row["id"]),
+            )
 
         token = secrets.token_urlsafe(32)
+        token_hash = hash_token_value(token)
         conn.execute(
             """
             INSERT INTO auth_tokens (token, user_id, created_at)
             VALUES (?, ?, ?)
             """,
-            (token, row["id"], now_iso()),
+            (token_hash, row["id"], now_iso()),
         )
         record_audit(
             conn,
@@ -1582,8 +1665,12 @@ def logout_user(authorization: Optional[str] = Header(None)):
     token = bearer_token(authorization)
     if not token:
         return api_error(401, 40102, "unauthorized")
+    token_hash = hash_token_value(token)
     with get_connection() as conn:
-        cursor = conn.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
+        cursor = conn.execute(
+            "DELETE FROM auth_tokens WHERE token = ? OR token = ?",
+            (token_hash, token),
+        )
         if cursor.rowcount:
             record_audit(conn, "auth.logout", resource_type="auth_token")
     if cursor.rowcount == 0:
@@ -1597,6 +1684,7 @@ def refresh_auth_token(authorization: Optional[str] = Header(None)):
     old_token = bearer_token(authorization)
     if not old_token:
         return api_error(401, 40102, "unauthorized")
+    old_token_hash = hash_token_value(old_token)
 
     with get_connection() as conn:
         row = conn.execute(
@@ -1604,21 +1692,25 @@ def refresh_auth_token(authorization: Optional[str] = Header(None)):
             SELECT users.*
             FROM auth_tokens
             JOIN users ON users.id = auth_tokens.user_id
-            WHERE auth_tokens.token = ?
+            WHERE auth_tokens.token = ? OR auth_tokens.token = ?
             """,
-            (old_token,),
+            (old_token_hash, old_token),
         ).fetchone()
         if not row:
             return api_error(401, 40102, "unauthorized")
 
         new_token = secrets.token_urlsafe(32)
-        conn.execute("DELETE FROM auth_tokens WHERE token = ?", (old_token,))
+        new_token_hash = hash_token_value(new_token)
+        conn.execute(
+            "DELETE FROM auth_tokens WHERE token = ? OR token = ?",
+            (old_token_hash, old_token),
+        )
         conn.execute(
             """
             INSERT INTO auth_tokens (token, user_id, created_at)
             VALUES (?, ?, ?)
             """,
-            (new_token, row["id"], now_iso()),
+            (new_token_hash, row["id"], now_iso()),
         )
         record_audit(
             conn,
@@ -2085,6 +2177,15 @@ def create_v1_task(
             "SELECT * FROM task_handoff WHERE rowid = ?",
             (cursor.lastrowid,),
         ).fetchone()
+        record_status_history(
+            conn,
+            task_id=task_id,
+            from_status=None,
+            to_status="pending_pack",
+            reason="task created",
+            actor_user_id=user["user_id"],
+            changed_at=timestamp,
+        )
         record_audit(
             conn,
             "task.create",
@@ -2228,6 +2329,15 @@ def cancel_v1_task(
             """,
             ("canceled", timestamp, reason, timestamp, task_id),
         )
+        record_status_history(
+            conn,
+            task_id=task_id,
+            from_status=task["status"],
+            to_status="canceled",
+            reason=reason,
+            actor_user_id=user["user_id"],
+            changed_at=timestamp,
+        )
         updated = get_task_by_id(conn, task_id)
     return api_success(enrich_task(updated, conn), "task canceled")
 
@@ -2271,6 +2381,15 @@ def precheck_v1_task(
                 timestamp,
                 task_id,
             ),
+        )
+        record_status_history(
+            conn,
+            task_id=task_id,
+            from_status=task["status"],
+            to_status="pending_handoff" if payload.passed else "pending_pack",
+            reason=payload.note or "precheck",
+            actor_user_id=user["user_id"],
+            changed_at=timestamp,
         )
         updated = get_task_by_id(conn, task_id)
     return api_success(enrich_task(updated, conn), "task prechecked")
@@ -2670,6 +2789,8 @@ def confirm_v1_handoff(
             return api_error(409, 40931, "handoff state conflict")
         if handoff["to_user_id"] != user["user_id"] and user["role"] != "admin":
             return api_error(403, 40301, "forbidden")
+        task_row = get_task_by_id(conn, handoff["task_id"])
+        previous_status = canonical_task_status(row_to_dict(task_row)) if task_row else None
 
         certificate_no = f"HO-CERT-{handoff['id']:06d}"
         trace_hash = build_trace_hash(
@@ -2709,6 +2830,16 @@ def confirm_v1_handoff(
             """,
             ("in_transit", timestamp, timestamp, handoff["task_id"]),
         )
+        if previous_status != "in_transit":
+            record_status_history(
+                conn,
+                task_id=handoff["task_id"],
+                from_status=previous_status,
+                to_status="in_transit",
+                reason="handoff confirmed",
+                actor_user_id=user["user_id"],
+                changed_at=timestamp,
+            )
         updated = conn.execute(
             "SELECT * FROM handoffs WHERE handoff_id = ?",
             (handoff_id,),
@@ -3084,6 +3215,7 @@ def start_v1_task(task_id: str):
             "pending_handoff",
         }:
             return task_state_conflict()
+        previous_status = canonical_task_status(row_to_dict(row))
         conn.execute(
             """
             UPDATE task_handoff
@@ -3093,6 +3225,14 @@ def start_v1_task(task_id: str):
             WHERE task_id = ?
             """,
             ("in_transit", timestamp, timestamp, task_id),
+        )
+        record_status_history(
+            conn,
+            task_id=task_id,
+            from_status=previous_status,
+            to_status="in_transit",
+            reason="task started",
+            changed_at=timestamp,
         )
         record_audit(
             conn,
@@ -3113,7 +3253,8 @@ def arrive_v1_task(task_id: str):
         row = get_task_by_id(conn, task_id)
         if not row:
             return api_error(404, 40401, "task not found")
-        if canonical_task_status(row_to_dict(row)) != "in_transit":
+        previous_status = canonical_task_status(row_to_dict(row))
+        if previous_status != "in_transit":
             return task_state_conflict()
         conn.execute(
             """
@@ -3122,6 +3263,14 @@ def arrive_v1_task(task_id: str):
             WHERE task_id = ?
             """,
             ("arrived", timestamp, timestamp, task_id),
+        )
+        record_status_history(
+            conn,
+            task_id=task_id,
+            from_status=previous_status,
+            to_status="arrived",
+            reason="task arrived",
+            changed_at=timestamp,
         )
         record_audit(
             conn,
@@ -3142,7 +3291,8 @@ def sign_v1_task(task_id: str):
         row = get_task_by_id(conn, task_id)
         if not row:
             return api_error(404, 40401, "task not found")
-        if canonical_task_status(row_to_dict(row)) not in {"in_transit", "arrived"}:
+        previous_status = canonical_task_status(row_to_dict(row))
+        if previous_status not in {"in_transit", "arrived"}:
             return task_state_conflict()
         conn.execute(
             """
@@ -3151,6 +3301,14 @@ def sign_v1_task(task_id: str):
             WHERE task_id = ?
             """,
             ("signed", timestamp, timestamp, task_id),
+        )
+        record_status_history(
+            conn,
+            task_id=task_id,
+            from_status=previous_status,
+            to_status="signed",
+            reason="task signed",
+            changed_at=timestamp,
         )
         record_audit(
             conn,
@@ -3175,7 +3333,8 @@ def reject_v1_task(task_id: str, data: RejectTaskIn):
         row = get_task_by_id(conn, task_id)
         if not row:
             return api_error(404, 40401, "task not found")
-        if canonical_task_status(row_to_dict(row)) not in {"in_transit", "arrived"}:
+        previous_status = canonical_task_status(row_to_dict(row))
+        if previous_status not in {"in_transit", "arrived"}:
             return task_state_conflict()
         conn.execute(
             """
@@ -3185,6 +3344,14 @@ def reject_v1_task(task_id: str, data: RejectTaskIn):
             WHERE task_id = ?
             """,
             ("rejected", timestamp, reason, timestamp, task_id),
+        )
+        record_status_history(
+            conn,
+            task_id=task_id,
+            from_status=previous_status,
+            to_status="rejected",
+            reason=reason,
+            changed_at=timestamp,
         )
         record_audit(
             conn,
