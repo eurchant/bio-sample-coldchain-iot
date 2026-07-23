@@ -1,4 +1,4 @@
-import type { HandoffNode, Task, TaskStatus } from '../types/contracts'
+import type { HandoffNode, Task, TaskStatus, Telemetry } from '../types/contracts'
 
 export type HandoffProgressPhase =
   | 'not_started'
@@ -43,6 +43,26 @@ export interface GnssTrajectoryEmptyState {
   title: string
   message: string
   requiredFields: readonly GnssRequiredField[]
+}
+
+export interface GnssTrajectoryPoint {
+  id: number
+  timestamp: string
+  lat: number
+  lng: number
+  accuracy: number | null
+}
+
+export interface GnssTrajectory {
+  available: boolean
+  points: GnssTrajectoryPoint[]
+  title: string
+  message: string
+}
+
+export interface ProjectedGnssPoint extends GnssTrajectoryPoint {
+  x: number
+  y: number
 }
 
 export const HANDOFF_PROGRESS_BY_STATUS: Readonly<Record<TaskStatus, HandoffProgress>> = {
@@ -162,9 +182,80 @@ export function getGnssTrajectoryEmptyState(): GnssTrajectoryEmptyState {
     available: false,
     points: [],
     title: '暂无真实地图轨迹',
-    message: '后端未提供 GNSS 经纬度，不能显示真实地图轨迹。',
+    message: '当前任务后端未提供 GNSS 经纬度，不能显示真实地图轨迹。',
     requiredFields: ['latitude', 'longitude', 'timestamp'],
   }
+}
+
+/**
+ * Keeps only coordinate pairs actually returned by the telemetry history. No
+ * participant name, task address or Mock coordinate is used as a fallback.
+ */
+export function buildGnssTrajectory(history: readonly Telemetry[] = []): GnssTrajectory {
+  const points = history
+    .filter(
+      (item): item is Telemetry & { lat: number; lng: number } =>
+        Number.isFinite(item.lat) &&
+        Number.isFinite(item.lng) &&
+        Math.abs(item.lat as number) <= 90 &&
+        Math.abs(item.lng as number) <= 180,
+    )
+    .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp))
+    .map((item) => ({
+      id: item.id,
+      timestamp: item.timestamp,
+      lat: item.lat,
+      lng: item.lng,
+      accuracy: Number.isFinite(item.accuracy) ? item.accuracy ?? null : null,
+    }))
+
+  if (!points.length) {
+    return {
+      available: false,
+      points: [],
+      title: '暂无真实地图轨迹',
+      message: getGnssTrajectoryEmptyState().message,
+    }
+  }
+
+  return {
+    available: true,
+    points,
+    title: '真实 GNSS 轨迹',
+    message: '坐标仅来自后端遥测历史；未加载底图时以相对投影展示，不会推断或补造位置。',
+  }
+}
+
+/**
+ * Projects genuine longitude/latitude pairs for a lightweight trajectory
+ * preview. This is deliberately not a geographic base map and never creates
+ * points that were not received from the backend.
+ */
+export function projectGnssTrajectory(
+  points: readonly GnssTrajectoryPoint[],
+  width = 640,
+  height = 260,
+  padding = 28,
+): ProjectedGnssPoint[] {
+  if (!points.length) return []
+  if (points.length === 1) {
+    return [{ ...points[0], x: width / 2, y: height / 2 }]
+  }
+
+  const minLat = Math.min(...points.map((point) => point.lat))
+  const maxLat = Math.max(...points.map((point) => point.lat))
+  const minLng = Math.min(...points.map((point) => point.lng))
+  const maxLng = Math.max(...points.map((point) => point.lng))
+  const latRange = Math.max(maxLat - minLat, Number.EPSILON)
+  const lngRange = Math.max(maxLng - minLng, Number.EPSILON)
+  const usableWidth = Math.max(width - padding * 2, 0)
+  const usableHeight = Math.max(height - padding * 2, 0)
+
+  return points.map((point) => ({
+    ...point,
+    x: padding + ((point.lng - minLng) / lngRange) * usableWidth,
+    y: height - padding - ((point.lat - minLat) / latRange) * usableHeight,
+  }))
 }
 
 function createRouteNode(

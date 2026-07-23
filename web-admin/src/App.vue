@@ -11,6 +11,7 @@ import {
   type ThemePreference,
 } from './lib/theme'
 import { runtimeConfig } from './services/config'
+import { AUTH_SESSION_INVALIDATED_EVENT } from './services/session'
 import { hasRoleAccess, type DemoRole, useAuthStore } from './stores/auth'
 import { useTaskStore } from './stores/task'
 
@@ -27,16 +28,33 @@ const route = useRoute()
 const router = useRouter()
 const themePreference = ref<ThemePreference>(readThemePreference())
 
-const navItems: NavigationItem[] = [
-  { label: '任务总览', hint: 'TASK', to: '/' },
-  { label: '监控与交接', hint: 'LIVE', to: '/tasks/' + runtimeConfig.taskId },
-  { label: '路线与轨迹', hint: 'MAP', to: '/tasks/' + runtimeConfig.taskId + '/map' },
-  { label: '可信追溯', hint: 'TRACE', to: '/trace/' + runtimeConfig.taskId, roles: ['admin', 'sender', 'receiver'] },
-  { label: '实时大屏', hint: 'SCREEN', to: '/screen', roles: ['admin'] },
-]
+const currentTaskId = computed(() => {
+  const routeTaskId = route.params.taskId
+  if (typeof routeTaskId === 'string' && routeTaskId) return routeTaskId
+  return store.activeTaskId || (runtimeConfig.dataSource === 'mock' ? runtimeConfig.taskId : null)
+})
+const navItems = computed<NavigationItem[]>(() => [
+  { label: '任务总览', hint: 'TASK', to: '/tasks' },
+  ...(runtimeConfig.dataSource === 'api'
+    ? [{ label: '设备台账', hint: 'DEVICE', to: '/devices', roles: ['admin', 'sender'] as DemoRole[] }]
+    : []),
+  ...(currentTaskId.value
+    ? [
+        { label: '监控与交接', hint: 'LIVE', to: '/tasks/' + currentTaskId.value },
+        { label: '路线与轨迹', hint: 'MAP', to: '/tasks/' + currentTaskId.value + '/map' },
+        {
+          label: '可信追溯',
+          hint: 'TRACE',
+          to: '/trace/' + currentTaskId.value,
+          roles: ['admin', 'sender', 'receiver'] as DemoRole[],
+        },
+      ]
+    : []),
+  { label: '实时大屏', hint: 'SCREEN', to: '/screen', roles: ['admin'] as DemoRole[] },
+])
 
 const visibleNavItems = computed(() =>
-  navItems.filter((item) => hasRoleAccess(auth.role, item.roles)),
+  navItems.value.filter((item) => hasRoleAccess(auth.role, item.roles)),
 )
 const showApplicationShell = computed(() => auth.isAuthenticated && route.name !== 'login')
 const sourceLabel = computed(() =>
@@ -55,7 +73,9 @@ function stopPolling() {
 
 async function startPolling() {
   if (!auth.isAuthenticated) return
-  await store.bootstrap()
+  if (runtimeConfig.dataSource === 'mock' || store.activeTaskId) {
+    await store.bootstrap(store.activeTaskId ?? undefined)
+  }
   if (!auth.isAuthenticated) return
 
   stopPolling()
@@ -64,9 +84,16 @@ async function startPolling() {
   }, runtimeConfig.pollingIntervalMs)
 }
 
-function logout() {
-  auth.logout()
+async function logout() {
+  await auth.logout()
   void router.replace({ name: 'login' })
+}
+
+function handleSessionInvalidated() {
+  auth.handleSessionInvalidated()
+  if (route.name !== 'login') {
+    void router.replace({ name: 'login', query: { redirect: route.fullPath } })
+  }
 }
 
 function syncTheme() {
@@ -91,6 +118,7 @@ onMounted(() => {
       ? window.matchMedia(SYSTEM_THEME_MEDIA_QUERY)
       : null
   systemThemeQuery?.addEventListener('change', syncSystemTheme)
+  window.addEventListener(AUTH_SESSION_INVALIDATED_EVENT, handleSessionInvalidated)
   syncTheme()
   if (auth.isAuthenticated) void startPolling()
 })
@@ -108,6 +136,7 @@ watch(
 
 onUnmounted(() => {
   systemThemeQuery?.removeEventListener('change', syncSystemTheme)
+  window.removeEventListener(AUTH_SESSION_INVALIDATED_EVENT, handleSessionInvalidated)
   systemThemeQuery = null
   stopPolling()
 })
@@ -168,8 +197,8 @@ onUnmounted(() => {
             </button>
           </div>
           <div class="identity-menu">
-            <span>演示身份</span>
-            <strong>{{ auth.roleLabel }}</strong>
+            <span>{{ auth.isApiMode ? '当前账号' : '演示身份' }}</span>
+            <strong>{{ auth.isApiMode ? auth.displayName : auth.roleLabel }}</strong>
             <button type="button" @click="logout">退出</button>
           </div>
         </div>

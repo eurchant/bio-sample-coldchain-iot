@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildGnssTrajectory,
   buildHandoffRouteNodes,
   getGnssTrajectoryEmptyState,
   getHandoffProgress,
+  projectGnssTrajectory,
 } from './route'
 import type { Task, TaskStatus } from '../types/contracts'
 
@@ -74,5 +76,80 @@ describe('handoff route helpers', () => {
     expect(state.points).toEqual([])
     expect(state.requiredFields).toEqual(['latitude', 'longitude', 'timestamp'])
     expect(state.message).toContain('后端未提供 GNSS 经纬度')
+  })
+
+  it('keeps only genuine telemetry coordinate pairs and orders them by capture time', () => {
+    const trajectory = buildGnssTrajectory([
+      {
+        id: 2,
+        device_id: 'CLD-001',
+        task_id: 'TASK-001',
+        temperature: 4,
+        humidity: 60,
+        light_raw: 10,
+        box_status: 'BOX_CLOSED',
+        move_status: 'STABLE',
+        temp_status: 'TEMP_OK',
+        acc_total: 9.8,
+        motion_score: 0.1,
+        event_type: 'NORMAL',
+        timestamp: '2026-07-23T10:01:00+08:00',
+        created_at: '2026-07-23T10:01:00+08:00',
+        lat: 31.204,
+        lng: 121.401,
+        accuracy: 12,
+      },
+      {
+        id: 1,
+        device_id: 'CLD-001',
+        task_id: 'TASK-001',
+        temperature: 4,
+        humidity: 60,
+        light_raw: 10,
+        box_status: 'BOX_CLOSED',
+        move_status: 'STABLE',
+        temp_status: 'TEMP_OK',
+        acc_total: 9.8,
+        motion_score: 0.1,
+        event_type: 'NORMAL',
+        timestamp: '2026-07-23T10:00:00+08:00',
+        created_at: '2026-07-23T10:00:00+08:00',
+        lat: 31.203,
+        lng: 121.4,
+      },
+      {
+        id: 3,
+        device_id: 'CLD-001',
+        task_id: 'TASK-001',
+        temperature: 4,
+        humidity: 60,
+        light_raw: 10,
+        box_status: 'BOX_CLOSED',
+        move_status: 'STABLE',
+        temp_status: 'TEMP_OK',
+        acc_total: 9.8,
+        motion_score: 0.1,
+        event_type: 'NORMAL',
+        timestamp: '2026-07-23T10:02:00+08:00',
+        created_at: '2026-07-23T10:02:00+08:00',
+        lat: null,
+        lng: null,
+      },
+    ])
+
+    expect(trajectory.available).toBe(true)
+    expect(trajectory.points.map((point) => point.id)).toEqual([1, 2])
+    expect(trajectory.points).toHaveLength(2)
+  })
+
+  it('projects existing GNSS records without adding trajectory points', () => {
+    const points = projectGnssTrajectory([
+      { id: 1, timestamp: '2026-07-23T10:00:00+08:00', lat: 31.2, lng: 121.4, accuracy: null },
+      { id: 2, timestamp: '2026-07-23T10:01:00+08:00', lat: 31.21, lng: 121.42, accuracy: 8 },
+    ])
+
+    expect(points).toHaveLength(2)
+    expect(points.map((point) => point.id)).toEqual([1, 2])
+    expect(points.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y))).toBe(true)
   })
 })

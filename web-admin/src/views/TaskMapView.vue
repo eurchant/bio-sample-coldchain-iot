@@ -1,29 +1,43 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import {
+  buildGnssTrajectory,
   buildHandoffRouteNodes,
   getGnssTrajectoryEmptyState,
   getHandoffProgress,
+  projectGnssTrajectory,
 } from '../lib/route'
 import { formatTime, taskLabel } from '../lib/format'
 import { useTaskStore } from '../stores/task'
 
 const store = useTaskStore()
+const route = useRoute()
 const task = computed(() => store.task)
+const routeTaskId = computed(() => String(route.params.taskId || ''))
 const progress = computed(() => (task.value ? getHandoffProgress(task.value.status) : null))
 const routeNodes = computed(() =>
   task.value ? buildHandoffRouteNodes(task.value, store.trace?.handoff_nodes ?? []) : [],
 )
 const gnssEmptyState = getGnssTrajectoryEmptyState()
+const gnssTrajectory = computed(() => buildGnssTrajectory(store.history))
+const projectedGnssPoints = computed(() => projectGnssTrajectory(gnssTrajectory.value.points))
+const gnssSvgPoints = computed(() =>
+  projectedGnssPoints.value.map((point) => `${point.x},${point.y}`).join(' '),
+)
 
-onMounted(() => {
-  if (!store.task && !store.loading) void store.bootstrap()
-  if (!store.trace && !store.traceLoading) void store.loadTrace()
-})
+function loadTaskMap() {
+  if (!routeTaskId.value) return
+  void store.bootstrap(routeTaskId.value)
+  void store.loadTrace(routeTaskId.value)
+}
+
+onMounted(loadTaskMap)
+watch(routeTaskId, loadTaskMap)
 
 function retryLoad() {
-  void Promise.all([store.bootstrap(), store.loadTrace()])
+  void Promise.all([store.bootstrap(routeTaskId.value), store.loadTrace(routeTaskId.value)])
 }
 </script>
 
@@ -86,14 +100,47 @@ function retryLoad() {
         </ol>
       </section>
 
-      <section class="gnss-empty-state" data-testid="gnss-empty-state" role="status" aria-live="polite">
+      <section v-if="gnssTrajectory.available" class="gnss-trajectory-state" aria-label="真实 GNSS 轨迹">
+        <div class="route-section-heading">
+          <div>
+            <p>REAL TELEMETRY COORDINATES</p>
+            <h3>{{ gnssTrajectory.title }}</h3>
+          </div>
+          <span class="route-progress-label">{{ gnssTrajectory.points.length }} 个定位点</span>
+        </div>
+        <p class="gnss-trajectory-note">{{ gnssTrajectory.message }}</p>
+        <div class="gnss-trajectory-canvas" aria-label="真实坐标相对投影">
+          <svg viewBox="0 0 640 260" role="img" aria-label="GNSS 相对轨迹图">
+            <polyline v-if="projectedGnssPoints.length > 1" :points="gnssSvgPoints" />
+            <circle
+              v-for="(point, index) in projectedGnssPoints"
+              :key="point.id"
+              :cx="point.x"
+              :cy="point.y"
+              :class="{ 'is-first': index === 0, 'is-last': index === projectedGnssPoints.length - 1 }"
+              r="5"
+            />
+          </svg>
+          <span class="gnss-canvas-caption">相对投影 · 北向上 · 不使用 Mock 坐标或参与方地址</span>
+        </div>
+        <ol class="gnss-coordinate-list">
+          <li v-for="(point, index) in gnssTrajectory.points" :key="point.id">
+            <b>{{ String(index + 1).padStart(2, '0') }}</b>
+            <span class="mono">{{ point.lat.toFixed(6) }}, {{ point.lng.toFixed(6) }}</span>
+            <time>{{ formatTime(point.timestamp) }}</time>
+            <em>{{ point.accuracy === null ? '精度未上报' : `精度约 ${point.accuracy} m` }}</em>
+          </li>
+        </ol>
+      </section>
+
+      <section v-else class="gnss-empty-state" data-testid="gnss-empty-state" role="status" aria-live="polite">
         <div class="gnss-empty-icon" aria-hidden="true">⌁</div>
         <div>
           <p>MAP DATA UNAVAILABLE</p>
           <h3>{{ gnssEmptyState.title }}</h3>
           <strong>{{ gnssEmptyState.message }}</strong>
           <p>
-            如需显示真实地图轨迹，后端定位/轨迹数据需提供实际采集的
+            如需显示真实地图轨迹，硬件与后端定位/轨迹数据需提供实际采集的
             <code v-for="field in gnssEmptyState.requiredFields" :key="field">{{ field }}</code>
             字段；在接口提供前，本页只展示非地理交接路径。
           </p>
