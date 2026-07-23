@@ -28,7 +28,7 @@ describe('API session storage', () => {
     saveApiSession({ token: 'not-a-real-token', user })
 
     expect(readApiSession()).toEqual({ token: 'not-a-real-token', user })
-    expect(localStorage.getItem(API_SESSION_STORAGE_KEY)).toBeNull()
+    expect(window.localStorage?.getItem(API_SESSION_STORAGE_KEY) ?? null).toBeNull()
   })
 
   it('removes malformed session data instead of trusting it as an authorization context', () => {
