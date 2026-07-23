@@ -31,6 +31,7 @@ temp/
 .env
 .env.*
 !.env.example
+hardware/config.py
 *.key
 *.pem
 *.p12
