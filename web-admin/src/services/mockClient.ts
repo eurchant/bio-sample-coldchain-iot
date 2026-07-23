@@ -65,4 +65,10 @@ export const mockGateway: TaskGateway = {
   async rejectTask() {
     throw new ApiError('Mock 数据源仅提供查询样例；请切换到 API 数据源后提交拒收')
   },
+  async acknowledgeAlarm() {
+    throw new ApiError('Mock 数据源仅提供查询样例；请切换到 API 数据源后确认告警')
+  },
+  async resolveAlarm() {
+    throw new ApiError('Mock 数据源仅提供查询样例；请切换到 API 数据源后处置告警')
+  },
 }

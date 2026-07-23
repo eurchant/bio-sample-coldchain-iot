@@ -13,6 +13,8 @@ const { gatewayMock } = vi.hoisted(() => ({
     startTask: vi.fn(),
     signTask: vi.fn(),
     rejectTask: vi.fn(),
+    acknowledgeAlarm: vi.fn(),
+    resolveAlarm: vi.fn(),
   },
 }))
 
@@ -145,5 +147,34 @@ describe('task monitoring store', () => {
     expect(store.task?.status).toBe('signed')
     expect(store.actionLoading).toBeNull()
     expect(store.actionMessage).toContain('签收')
+  })
+
+  it('updates an alarm from the server response after an administrator resolves it', async () => {
+    const store = useTaskStore()
+    store.alarms = [
+      {
+        id: 9,
+        data_id: 1,
+        task_id: 'TASK-001',
+        device_id: 'CLD-001',
+        event_type: 'TEMP_ALERT',
+        event_name: '温度异常',
+        event_detail: '温度超过阈值',
+        timestamp: recordedAt,
+        created_at: recordedAt,
+        alarm_status: 'acknowledged',
+      },
+    ]
+    gatewayMock.resolveAlarm.mockResolvedValue({
+      ...store.alarms[0],
+      alarm_status: 'resolved',
+      resolution: '已完成复核',
+    })
+
+    await store.performAlarmAction(9, 'resolve', '已完成复核')
+
+    expect(gatewayMock.resolveAlarm).toHaveBeenCalledWith(9, '已完成复核')
+    expect(store.alarms[0].alarm_status).toBe('resolved')
+    expect(store.alarms[0].resolution).toBe('已完成复核')
   })
 })

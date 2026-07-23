@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import { formatTime, formatValue, statusTone, taskLabel, temperatureLabel } from '../lib/format'
 import { printTraceReport } from '../lib/reportExport'
+import { downloadTaskTracePdf } from '../services/api'
 import { useTaskStore } from '../stores/task'
 
 const route = useRoute()
@@ -11,6 +12,8 @@ const store = useTaskStore()
 const report = computed(() => store.trace)
 const routeTaskId = computed(() => String(route.params.taskId || ''))
 const canExportPdf = computed(() => Boolean(report.value))
+const downloadingPdf = ref(false)
+const pdfError = ref<string | null>(null)
 
 const handoffLabel: Record<string, string> = {
   started: '发出交接',
@@ -19,7 +22,11 @@ const handoffLabel: Record<string, string> = {
 }
 
 onMounted(() => {
-  void store.loadTrace()
+  if (routeTaskId.value) void store.loadTrace(routeTaskId.value)
+})
+
+watch(routeTaskId, (taskId) => {
+  if (taskId) void store.loadTrace(taskId)
 })
 
 function exportPdf() {
@@ -27,8 +34,29 @@ function exportPdf() {
   printTraceReport(report.value.task.task_id, report.value.task.updated_at)
 }
 
+async function downloadPdf() {
+  if (!report.value || downloadingPdf.value) return
+  downloadingPdf.value = true
+  pdfError.value = null
+  try {
+    const blob = await downloadTaskTracePdf(report.value.task.task_id)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${report.value.task.task_id}-trace-report.pdf`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    pdfError.value = error instanceof Error ? error.message : '后端 PDF 下载失败。'
+  } finally {
+    downloadingPdf.value = false
+  }
+}
+
 function retryLoad() {
-  void store.loadTrace()
+  void store.loadTrace(routeTaskId.value)
 }
 </script>
 
@@ -41,17 +69,22 @@ function retryLoad() {
         <p>报告数据直接来自后端聚合接口，可用于比赛现场投屏和查询对照。</p>
       </div>
       <div class="heading-actions">
-        <button class="ghost-button" type="button" @click="store.loadTrace()" :disabled="store.traceLoading">
+        <button class="ghost-button" type="button" @click="retryLoad" :disabled="store.traceLoading">
           {{ store.traceLoading ? '生成中…' : '刷新报告' }}
         </button>
         <div class="pdf-export-control">
-          <button class="print-button" type="button" :disabled="!canExportPdf" @click="exportPdf">
+          <button class="print-button" type="button" :disabled="!canExportPdf || downloadingPdf" @click="downloadPdf">
+            {{ downloadingPdf ? '下载中…' : '下载后端 PDF' }}
+          </button>
+          <button class="ghost-button print-fallback" type="button" :disabled="!canExportPdf" @click="exportPdf">
             打印 / 保存 PDF
           </button>
-          <small>在系统打印窗口中选择“另存为 PDF”</small>
+          <small>下载失败时可使用浏览器打印作为降级方案</small>
         </div>
       </div>
     </div>
+
+    <p v-if="pdfError" class="report-download-error print-hidden" role="alert">PDF 提示：{{ pdfError }}</p>
 
     <AsyncStatePanel
       v-if="store.traceLoading && !report"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AsyncStatePanel from '../components/AsyncStatePanel.vue'
 import {
@@ -13,22 +13,34 @@ import {
   temperatureLabel,
 } from '../lib/format'
 import { useTaskStore } from '../stores/task'
-import type { TaskStatus } from '../types/contracts'
+import { useAuthStore } from '../stores/auth'
+import type { Alarm, TaskStatus } from '../types/contracts'
 
 type TaskAction = 'start' | 'sign' | 'reject'
 
 const route = useRoute()
 const store = useTaskStore()
+const auth = useAuthStore()
 const pendingAction = ref<TaskAction | null>(null)
 const reason = ref('')
+const pendingAlarm = ref<Alarm | null>(null)
+const alarmResolution = ref('')
 
 const task = computed(() => store.task)
 const telemetry = computed(() => store.telemetry)
 const routeTaskId = computed(() => String(route.params.taskId || ''))
 const canStart = computed(
-  () => task.value?.status === 'pending_pack' || task.value?.status === 'pending_handoff',
+  () =>
+    (task.value?.status === 'pending_pack' || task.value?.status === 'pending_handoff') &&
+    auth.hasPermission('start_task'),
 )
-const canComplete = computed(() => task.value && isActionableStatus(task.value.status))
+const canSign = computed(
+  () => task.value && isActionableStatus(task.value.status) && auth.hasPermission('sign_task'),
+)
+const canReject = computed(
+  () => task.value && isActionableStatus(task.value.status) && auth.hasPermission('reject_task'),
+)
+const canManageAlarms = computed(() => auth.role === 'admin')
 
 const actionCopy: Record<TaskAction, { title: string; description: string; confirm: string }> = {
   start: {
@@ -63,6 +75,7 @@ const statusTimeline = computed(() => {
 })
 
 function openAction(action: TaskAction) {
+  pendingAlarm.value = null
   pendingAction.value = action
   reason.value = ''
 }
@@ -74,13 +87,64 @@ function closeAction() {
 
 async function submitAction() {
   if (!pendingAction.value) return
-  await store.performAction(pendingAction.value, reason.value)
+  await store.performAction(pendingAction.value, reason.value, routeTaskId.value)
   if (!store.error) closeAction()
 }
 
-function retryLoad() {
-  void store.bootstrap()
+const alarmStatusLabel: Record<string, string> = {
+  new: '待确认',
+  acknowledged: '已确认',
+  resolved: '已解决',
 }
+
+function alarmStatusText(alarm: Alarm) {
+  return alarmStatusLabel[alarm.alarm_status ?? 'new'] ?? alarm.alarm_status ?? '待确认'
+}
+
+function alarmActionBusy(alarmId: number, action?: 'acknowledge' | 'resolve') {
+  return (
+    store.alarmActionLoading?.alarmId === alarmId &&
+    (!action || store.alarmActionLoading.action === action)
+  )
+}
+
+async function acknowledgeAlarm(alarm: Alarm) {
+  await store.performAlarmAction(alarm.id, 'acknowledge')
+}
+
+function openAlarmResolve(alarm: Alarm) {
+  pendingAction.value = null
+  pendingAlarm.value = alarm
+  alarmResolution.value = ''
+}
+
+function closeAlarmResolve() {
+  if (store.alarmActionLoading) return
+  pendingAlarm.value = null
+  alarmResolution.value = ''
+}
+
+async function submitAlarmResolve() {
+  if (!pendingAlarm.value) return
+  await store.performAlarmAction(pendingAlarm.value.id, 'resolve', alarmResolution.value)
+  if (!store.error) closeAlarmResolve()
+}
+
+function retryLoad() {
+  void store.bootstrap(routeTaskId.value)
+}
+
+function loadTask() {
+  if (!routeTaskId.value) return
+  if (store.task?.task_id === routeTaskId.value) {
+    store.activeTaskId = routeTaskId.value
+    return
+  }
+  void store.bootstrap(routeTaskId.value)
+}
+
+onMounted(loadTask)
+watch(routeTaskId, loadTask)
 </script>
 
 <template>
@@ -91,7 +155,7 @@ function retryLoad() {
         <h2>实时监控与交接</h2>
         <p>任务 <span class="mono">{{ routeTaskId }}</span> 的监测信息会自动刷新，状态变更只由后端确认。</p>
       </div>
-      <button class="ghost-button" type="button" @click="store.bootstrap()" :disabled="store.loading">
+      <button class="ghost-button" type="button" @click="retryLoad" :disabled="store.loading">
         {{ store.loading ? '同步中…' : '立即同步' }}
       </button>
     </div>
@@ -187,12 +251,12 @@ function retryLoad() {
               <b>{{ store.actionLoading === 'start' ? '正在发出…' : '发出交接' }}</b>
               <small>进入运输中</small>
             </button>
-            <button data-testid="sign-task" class="secondary-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('sign')">
+            <button data-testid="sign-task" class="secondary-action" type="button" :disabled="!canSign || store.actionLoading !== null" @click="openAction('sign')">
               <span>02</span>
               <b>{{ store.actionLoading === 'sign' ? '正在签收…' : '到达签收' }}</b>
               <small>完成交接</small>
             </button>
-            <button data-testid="reject-task" class="danger-action" type="button" :disabled="!canComplete || store.actionLoading !== null" @click="openAction('reject')">
+            <button data-testid="reject-task" class="danger-action" type="button" :disabled="!canReject || store.actionLoading !== null" @click="openAction('reject')">
               <span>03</span>
               <b>{{ store.actionLoading === 'reject' ? '正在提交…' : '拒收并记录原因' }}</b>
               <small>保留追溯证据</small>
@@ -237,6 +301,28 @@ function retryLoad() {
                 <p>{{ alarm.event_detail }}</p>
               </div>
               <time>{{ formatTime(alarm.timestamp) }}</time>
+              <div class="alarm-action-cell">
+                <span class="alarm-status-label">{{ alarmStatusText(alarm) }}</span>
+                <template v-if="canManageAlarms && alarm.alarm_status !== 'resolved'">
+                  <button
+                    v-if="alarm.alarm_status !== 'acknowledged'"
+                    class="alarm-action-button"
+                    type="button"
+                    :disabled="Boolean(store.alarmActionLoading)"
+                    @click="acknowledgeAlarm(alarm)"
+                  >
+                    {{ alarmActionBusy(alarm.id, 'acknowledge') ? '确认中…' : '确认' }}
+                  </button>
+                  <button
+                    class="alarm-action-button alarm-resolve-button"
+                    type="button"
+                    :disabled="Boolean(store.alarmActionLoading)"
+                    @click="openAlarmResolve(alarm)"
+                  >
+                    处置
+                  </button>
+                </template>
+              </div>
             </div>
           </div>
           <div v-else class="compact-empty">暂无异常事件。</div>
@@ -295,6 +381,32 @@ function retryLoad() {
             @click="submitAction"
           >
             {{ store.actionLoading ? '提交中…' : actionCopy[pendingAction].confirm }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="pendingAlarm" class="modal-backdrop" role="presentation" @click.self="closeAlarmResolve">
+      <section class="action-modal" role="dialog" aria-modal="true" aria-label="记录告警处置">
+        <button class="modal-close" type="button" aria-label="关闭" @click="closeAlarmResolve">×</button>
+        <p class="section-kicker">ALARM RESOLUTION</p>
+        <h3>记录告警处置</h3>
+        <p>
+          正在处置“{{ pendingAlarm.event_name }}”。处置说明将提交给后端并显示在后续追溯记录中。
+        </p>
+        <label class="reason-field">
+          <span>处置说明</span>
+          <textarea v-model="alarmResolution" rows="4" maxlength="300" placeholder="例如：已复核设备并完成样本检查"></textarea>
+        </label>
+        <div class="modal-actions">
+          <button class="ghost-button" type="button" @click="closeAlarmResolve">取消</button>
+          <button
+            class="primary-action modal-confirm"
+            type="button"
+            :disabled="Boolean(store.alarmActionLoading) || !alarmResolution.trim()"
+            @click="submitAlarmResolve"
+          >
+            {{ store.alarmActionLoading ? '提交中…' : '确认处置完成' }}
           </button>
         </div>
       </section>

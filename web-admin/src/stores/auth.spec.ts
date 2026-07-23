@@ -11,7 +11,7 @@ describe('demo auth store', () => {
   it('persists the selected demo role for the current browser session', () => {
     const store = useAuthStore()
 
-    store.login('carrier')
+    store.enterDemo('carrier')
 
     expect(store.role).toBe('carrier')
     expect(store.isAuthenticated).toBe(true)
@@ -19,22 +19,22 @@ describe('demo auth store', () => {
     expect(sessionStorage.getItem(AUTH_SESSION_KEY)).toBe('carrier')
   })
 
-  it('restores a valid demo role from the current browser session', () => {
+  it('restores a valid demo role from the current browser session', async () => {
     sessionStorage.setItem(AUTH_SESSION_KEY, 'receiver')
     const store = useAuthStore()
 
-    store.restore()
+    await store.restore()
 
     expect(store.role).toBe('receiver')
     expect(store.isAuthenticated).toBe(true)
     expect(store.restored).toBe(true)
   })
 
-  it('clears the selected demo role when logging out', () => {
+  it('clears the selected demo role when logging out', async () => {
     const store = useAuthStore()
-    store.login('admin')
+    store.enterDemo('admin')
 
-    store.logout()
+    await store.logout()
 
     expect(store.role).toBeNull()
     expect(store.isAuthenticated).toBe(false)

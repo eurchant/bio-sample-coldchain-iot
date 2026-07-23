@@ -123,7 +123,8 @@ flowchart LR
 ```text
 .
 ├── backend/        # FastAPI 后端、测试和后端运行说明
-├── 开发板/         # UniKnect MicroPython 采集、显示、联网及上传程序
+├── hardware/       # UniKnect MicroPython 采集、显示、联网及上传程序
+├── miniprogram/    # uni-app 小程序公共底座与任务交接 MVP
 ├── docs/           # 项目与团队协作文档
 ├── .gitignore
 └── README.md
@@ -133,7 +134,7 @@ flowchart LR
 
 ```text
 backend/
-device/             # 当前对应“开发板”目录，后续是否更名由团队统一决定
+hardware/
 web-admin/
 miniprogram/
 docs/
