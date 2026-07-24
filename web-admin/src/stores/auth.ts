@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { remoteAuthGateway } from '../services/api'
+import { describeApiError, remoteAuthGateway } from '../services/api'
 import { runtimeConfig } from '../services/config'
 import { clearApiSession, readApiSession, saveApiSession } from '../services/session'
 import type { AuthUser, UserRole } from '../types/contracts'
@@ -161,7 +161,7 @@ export const useAuthStore = defineStore('auth', {
         clearApiSession({ notify: false })
         this.user = null
         this.permissions = []
-        this.error = error instanceof Error ? error.message : '登录失败，请稍后重试。'
+        this.error = describeApiError(error)
         return false
       } finally {
         this.loading = false

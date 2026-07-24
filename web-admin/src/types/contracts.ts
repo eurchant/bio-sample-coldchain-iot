@@ -145,6 +145,121 @@ export interface DeviceBindingList {
   items: DeviceBinding[]
 }
 
+export interface UserCandidate {
+  user_id: number
+  name: string
+  display_name?: string | null
+  organization: string
+  role: Extract<UserRole, 'carrier' | 'receiver'>
+  status: string
+}
+
+export interface UserCandidateList {
+  items: UserCandidate[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface TaskAssignmentInput {
+  carrier_user_id?: number | null
+  receiver_user_id?: number | null
+}
+
+export interface TaskPrecheckInput {
+  passed: boolean
+  temperature?: number | null
+  seal_ok?: boolean | null
+  note?: string | null
+}
+
+export type HandoffType =
+  | 'sender_to_carrier'
+  | 'carrier_to_carrier'
+  | 'carrier_to_receiver'
+
+export interface HandoffUser {
+  user_id: number
+  name: string
+  organization: string
+  role: UserRole
+}
+
+export interface HandoffEvidence {
+  qr_verified: boolean
+  qr_verified_by_user_id: number | null
+  face_status: string
+  face_verified: boolean
+  face_manual_review_required: boolean
+  file_count: number
+}
+
+export interface HandoffRecord {
+  handoff_id: string
+  task_id: string
+  handoff_type: HandoffType
+  from_user_id: number | null
+  to_user_id: number
+  status: 'pending' | 'confirmed' | 'rejected' | string
+  reason?: string | null
+  created_at: string
+  updated_at?: string | null
+  confirmed_at?: string | null
+  rejected_at?: string | null
+  from_user?: HandoffUser | null
+  to_user?: HandoffUser | null
+  evidence: HandoffEvidence
+}
+
+export interface HandoffList {
+  items: HandoffRecord[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface QrTokenResult {
+  token_id: number
+  token: string
+  qr_payload: string
+  expires_at: string
+  refresh_after: number
+}
+
+export interface QrVerificationResult {
+  valid: boolean
+  token_id: number
+  task_id: string
+  handoff_id: string
+  action: string
+}
+
+export interface EvidenceFile {
+  id?: number
+  file_id: string
+  task_id: string
+  file_name: string
+  file_type: 'image/jpeg' | 'image/png' | 'application/pdf' | string
+  file_size: number
+  sha256: string
+  usage: string
+  related_type?: string | null
+  related_id?: string | null
+  created_at: string
+  download_url?: string
+}
+
+export interface DashboardSummary {
+  active_tasks: number
+  abnormal_tasks: number
+  online_devices: number
+  offline_devices: number
+  today_alarm_count: number
+  status_distribution: Record<string, number>
+  alarm_distribution: Record<string, number>
+  updated_at: string
+}
+
 export interface Telemetry {
   id: number
   device_id: string

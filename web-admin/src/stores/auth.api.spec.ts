@@ -24,7 +24,10 @@ vi.mock('../services/config', () => ({
   },
 }))
 
-vi.mock('../services/api', () => ({ remoteAuthGateway: authGatewayMock }))
+vi.mock('../services/api', () => ({
+  remoteAuthGateway: authGatewayMock,
+  describeApiError: (error: unknown) => error instanceof Error ? error.message : '请求失败',
+}))
 
 vi.mock('../services/session', () => ({
   clearApiSession: sessionMock.clear,

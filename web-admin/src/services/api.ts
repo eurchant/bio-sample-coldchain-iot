@@ -10,18 +10,27 @@ import type {
   AuthUser,
   ApiEnvelope,
   CreateTaskInput,
+  DashboardSummary,
   Device,
   DeviceBinding,
   DeviceBindingList,
   DeviceList,
+  EvidenceFile,
+  HandoffList,
+  HandoffRecord,
   RegisterDeviceInput,
+  QrTokenResult,
+  QrVerificationResult,
   Task,
+  TaskAssignmentInput,
   TaskList,
   TaskListQuery,
+  TaskPrecheckInput,
   Telemetry,
   TelemetryHistory,
   TraceReport,
   UpdateTaskInput,
+  UserCandidateList,
 } from '../types/contracts'
 
 export class ApiError extends Error {
@@ -75,6 +84,27 @@ export interface DeviceGateway {
   bindDevice(deviceId: string, taskId: string): Promise<DeviceBinding>
   unbindDevice(deviceId: string): Promise<Device>
   getBindings(deviceId: string): Promise<DeviceBindingList>
+}
+
+export interface TaskPreparationGateway {
+  listCandidates(role: 'carrier' | 'receiver'): Promise<UserCandidateList>
+  assignTask(taskId: string, input: TaskAssignmentInput): Promise<Task>
+  precheckTask(taskId: string, input: TaskPrecheckInput): Promise<Task>
+}
+
+export interface HandoffGateway {
+  listHandoffs(taskId: string): Promise<HandoffList>
+  createHandoff(taskId: string, input: { handoff_type: HandoffRecord['handoff_type']; to_user_id: number }): Promise<HandoffRecord>
+  createQrToken(taskId: string, input: { action: string; handoff_id: string; ttl_seconds?: number }): Promise<QrTokenResult>
+  verifyQrToken(token: string): Promise<QrVerificationResult>
+  confirmHandoff(handoffId: string, location?: { lat: number; lng: number; accuracy?: number }): Promise<HandoffRecord>
+  rejectHandoff(handoffId: string, reason: string): Promise<HandoffRecord>
+  uploadEvidence(input: { taskId: string; handoffId: string; usage: string; file: File; sha256: string }): Promise<EvidenceFile>
+  downloadEvidence(fileId: string): Promise<Blob>
+}
+
+export interface DashboardGateway {
+  getSummary(): Promise<DashboardSummary>
 }
 
 const http = axios.create({
@@ -146,6 +176,28 @@ async function request<T>(
   }
 }
 
+/**
+ * Converts contract-level failures into actionable wording while retaining the
+ * original error code for support and tests. It never grants access locally.
+ */
+export function describeApiError(error: unknown) {
+  if (!(error instanceof ApiError)) {
+    return error instanceof Error ? error.message : '请求失败，请稍后重试。'
+  }
+
+  if (error.status === 401) return '登录会话已失效，请重新登录。'
+  if (error.status === 403) return '当前账号没有此操作权限，请使用被指派的身份或联系管理员。'
+  if (error.status === 404) return '资源不存在，或当前账号无权查看该资源。'
+  if (error.status === 429) return '请求过于频繁，请稍后再试。'
+  if (error.code === 40902) return '发出前需完成承运方、接收方指派和装箱预检。'
+  if (error.code === 40932) return '接收方需先验证本次交接的动态二维码，再确认交接。'
+  if (error.code === 40933) return '签收前须完成“承运方 → 接收方”的二维码交接确认。'
+  if (error.code === 40950) return '文件校验值不一致，请重新选择原始文件后上传。'
+  if (error.status === 413) return '证据文件超过 5 MB，请压缩或选择更小的文件。'
+  if (error.status === 415) return '仅支持内容真实有效的 JPEG、PNG 或 PDF 证据文件。'
+  return error.message || '请求失败，请稍后重试。'
+}
+
 function idempotencyHeaders(idempotencyKey: string | undefined) {
   return idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined
 }
@@ -187,6 +239,69 @@ export const remoteTaskDirectory: TaskDirectoryGateway = {
   createTask: (input, idempotencyKey) =>
     request<Task>('/api/v1/tasks', 'post', input, undefined, idempotencyHeaders(idempotencyKey)),
   updateTask: (taskId, input) => request<Task>('/api/v1/tasks/' + taskId, 'patch', input),
+}
+
+export const remoteTaskPreparation: TaskPreparationGateway = {
+  listCandidates: (role) =>
+    request<UserCandidateList>('/api/v1/users', 'get', undefined, { role, page: 1, page_size: 100 }),
+  assignTask: (taskId, input) =>
+    request<Task>('/api/v1/tasks/' + pathSegment(taskId) + '/assign', 'post', input),
+  precheckTask: (taskId, input) =>
+    request<Task>('/api/v1/tasks/' + pathSegment(taskId) + '/precheck', 'post', input),
+}
+
+export const remoteHandoffGateway: HandoffGateway = {
+  listHandoffs: (taskId) =>
+    request<HandoffList>('/api/v1/tasks/' + pathSegment(taskId) + '/handoffs', 'get', undefined, {
+      page: 1,
+      page_size: 100,
+    }),
+  createHandoff: (taskId, input) =>
+    request<HandoffRecord>('/api/v1/tasks/' + pathSegment(taskId) + '/handoffs', 'post', input),
+  createQrToken: (taskId, input) =>
+    request<QrTokenResult>('/api/v1/tasks/' + pathSegment(taskId) + '/qr-tokens', 'post', input),
+  verifyQrToken: (token) => request<QrVerificationResult>('/api/v1/qr-tokens/verify', 'post', { token }),
+  confirmHandoff: (handoffId, location) =>
+    request<HandoffRecord>('/api/v1/handoffs/' + pathSegment(handoffId) + '/confirm', 'post', {
+      ...(location ? { location } : {}),
+    }),
+  rejectHandoff: (handoffId, reason) =>
+    request<HandoffRecord>('/api/v1/handoffs/' + pathSegment(handoffId) + '/reject', 'post', { reason }),
+  async uploadEvidence({ taskId, handoffId, usage, file, sha256 }) {
+    if (!runtimeConfig.apiBaseUrl) {
+      throw new ApiError('未配置 VITE_API_BASE_URL，无法上传真实证据文件')
+    }
+    const form = new FormData()
+    form.append('task_id', taskId)
+    form.append('usage', usage)
+    form.append('related_type', 'handoff')
+    form.append('related_id', handoffId)
+    form.append('expected_sha256', sha256)
+    form.append('file', file)
+    try {
+      const response = await http.post<ApiEnvelope<EvidenceFile>>('/api/v1/files/upload', form)
+      return unpack(response.data)
+    } catch (error) {
+      throw normalizeError(error)
+    }
+  },
+  async downloadEvidence(fileId) {
+    if (!runtimeConfig.apiBaseUrl) {
+      throw new ApiError('未配置 VITE_API_BASE_URL，无法下载证据文件')
+    }
+    try {
+      const response = await http.get('/api/v1/files/' + pathSegment(fileId) + '/download', {
+        responseType: 'blob',
+      })
+      return response.data as Blob
+    } catch (error) {
+      throw normalizeError(error)
+    }
+  },
+}
+
+export const remoteDashboardGateway: DashboardGateway = {
+  getSummary: () => request<DashboardSummary>('/api/v1/dashboard/summary', 'get'),
 }
 
 export const remoteAuthGateway: AuthGateway = {

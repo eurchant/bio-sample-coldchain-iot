@@ -51,7 +51,7 @@ router.beforeEach(async (to) => {
 
   const allowedRoles = to.meta.roles as readonly DemoRole[] | undefined
   if (to.meta.requiresAuth && !hasRoleAccess(auth.role, allowedRoles)) {
-    return { name: 'task-list' }
+    return { name: 'task-list', query: { notice: 'forbidden' } }
   }
 
   return true

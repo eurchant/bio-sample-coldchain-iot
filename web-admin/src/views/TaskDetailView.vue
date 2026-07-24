@@ -2,6 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AsyncStatePanel from '../components/AsyncStatePanel.vue'
+import HandoffLedger from '../components/HandoffLedger.vue'
+import TaskPreparationPanel from '../components/TaskPreparationPanel.vue'
 import {
   boxLabel,
   formatTime,
@@ -14,7 +16,7 @@ import {
 } from '../lib/format'
 import { useTaskStore } from '../stores/task'
 import { useAuthStore } from '../stores/auth'
-import type { Alarm, TaskStatus } from '../types/contracts'
+import type { Alarm, Task, TaskStatus } from '../types/contracts'
 
 type TaskAction = 'start' | 'sign' | 'reject'
 
@@ -41,6 +43,7 @@ const canReject = computed(
   () => task.value && isActionableStatus(task.value.status) && auth.hasPermission('reject_task'),
 )
 const canManageAlarms = computed(() => auth.role === 'admin')
+const canManagePreparation = computed(() => auth.role === 'admin' || auth.role === 'sender')
 
 const actionCopy: Record<TaskAction, { title: string; description: string; confirm: string }> = {
   start: {
@@ -134,6 +137,15 @@ function retryLoad() {
   void store.bootstrap(routeTaskId.value)
 }
 
+function applyPreparedTask(updated: Task) {
+  store.task = updated
+}
+
+function refreshAfterHandoff() {
+  void store.refreshMonitoring(routeTaskId.value)
+  void store.loadTrace(routeTaskId.value)
+}
+
 function loadTask() {
   if (!routeTaskId.value) return
   if (store.task?.task_id === routeTaskId.value) {
@@ -168,7 +180,14 @@ watch(routeTaskId, loadTask)
       </div>
     </div>
 
-    <template v-if="task">
+    <AsyncStatePanel
+      v-if="store.loading && !task"
+      state="loading"
+      title="正在读取任务详情"
+      description="正在同步任务、设备监测、历史记录和异常事件。"
+    />
+
+    <template v-else-if="task">
       <article class="task-hero">
         <div class="task-hero-main">
           <p class="section-kicker">TASK IDENTIFICATION</p>
@@ -193,6 +212,12 @@ watch(routeTaskId, loadTask)
       <div v-if="store.actionMessage" class="success-notice" role="status">
         <span>✓</span>{{ store.actionMessage }}
       </div>
+
+      <TaskPreparationPanel
+        :task="task"
+        :can-manage="canManagePreparation"
+        @updated="applyPreparedTask"
+      />
 
       <div class="monitor-grid">
         <article class="panel live-panel">
@@ -328,6 +353,13 @@ watch(routeTaskId, loadTask)
           <div v-else class="compact-empty">暂无异常事件。</div>
         </article>
       </div>
+
+      <HandoffLedger
+        :task="task"
+        :role="auth.role"
+        :user-id="auth.user?.user_id ?? null"
+        @task-updated="refreshAfterHandoff"
+      />
 
       <article class="panel history-panel">
         <div class="card-heading">

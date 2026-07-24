@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ApiError, remoteTaskDirectory } from '../services/api'
+import { ApiError, describeApiError, remoteTaskDirectory } from '../services/api'
 import { runtimeConfig } from '../services/config'
 import { gateway } from '../services/gateway'
 import type {
@@ -31,9 +31,10 @@ function displayError(error: unknown) {
     const detail = [error.status ? `HTTP ${error.status}` : '', error.code ? `code ${error.code}` : '']
       .filter(Boolean)
       .join(' / ')
-    return detail ? `${error.message}（${detail}）` : error.message
+    const message = describeApiError(error)
+    return detail ? `${message}（${detail}）` : message
   }
-  return error instanceof Error ? error.message : '请求失败，请稍后重试。'
+  return describeApiError(error)
 }
 
 function createIdempotencyKey() {

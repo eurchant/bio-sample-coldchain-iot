@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ApiError } from '../services/api'
+import { ApiError, describeApiError } from '../services/api'
 import { runtimeConfig } from '../services/config'
 import { gateway } from '../services/gateway'
 import type { Alarm, Task, Telemetry, TelemetryHistory, TraceReport } from '../types/contracts'
@@ -32,9 +32,9 @@ function displayError(error: unknown) {
       error.code ? 'code ' + error.code : '',
     ].filter(Boolean)
     const suffix = details.length ? '（' + details.join(' / ') + '）' : ''
-    return error.message + suffix
+    return describeApiError(error) + suffix
   }
-  return error instanceof Error ? error.message : '请求失败，请稍后重试'
+  return describeApiError(error)
 }
 
 function createIdempotencyKey(action: string, taskId: string) {
@@ -160,7 +160,12 @@ export const useTaskStore = defineStore('task', {
     async loadTrace(taskId?: string) {
       const requestedTaskId = this.resolveTaskId(taskId)
       if (!requestedTaskId) return
+      if (this.activeTaskId !== requestedTaskId) {
+        this.activeTaskId = requestedTaskId
+        this.resetTaskData()
+      }
       this.traceLoading = true
+      this.error = null
       try {
         const trace = await gateway.getTraceReport(requestedTaskId)
         if (this.activeTaskId === requestedTaskId) this.trace = trace

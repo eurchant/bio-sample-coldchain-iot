@@ -60,6 +60,11 @@ const showApplicationShell = computed(() => auth.isAuthenticated && route.name !
 const sourceLabel = computed(() =>
   runtimeConfig.dataSource === 'mock' ? 'Mock 演示数据' : '实时 API 联调',
 )
+const routeAccessNotice = computed(() =>
+  route.query.notice === 'forbidden'
+    ? '当前身份没有该页面权限；已返回任务总览。后端仍会对每个接口再次校验。'
+    : null,
+)
 
 let pollingId: number | undefined
 let systemThemeQuery: MediaQueryList | null = null
@@ -94,6 +99,12 @@ function handleSessionInvalidated() {
   if (route.name !== 'login') {
     void router.replace({ name: 'login', query: { redirect: route.fullPath } })
   }
+}
+
+function dismissRouteNotice() {
+  const query = { ...route.query }
+  delete query.notice
+  void router.replace({ query })
 }
 
 function syncTheme() {
@@ -207,6 +218,11 @@ onUnmounted(() => {
       <div v-if="store.error" class="global-notice" role="alert">
         <span>接口提示：{{ store.error }}</span>
         <button type="button" @click="store.clearError()">关闭</button>
+      </div>
+
+      <div v-if="routeAccessNotice" class="global-notice" role="status">
+        <span>权限提示：{{ routeAccessNotice }}</span>
+        <button type="button" @click="dismissRouteNotice">关闭</button>
       </div>
 
       <RouterView />
