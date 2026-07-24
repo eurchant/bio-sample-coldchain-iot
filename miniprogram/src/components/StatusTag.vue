@@ -5,14 +5,37 @@ import { taskStatusText } from '@/utils/status'
 
 const props = defineProps<{ status: TaskStatus }>()
 const tone = computed(() => {
-  const tones: Partial<Record<TaskStatus, string>> = { signed: 'ok', rejected: 'bad', canceled: 'muted', in_transit: 'active' }
+  const tones: Partial<Record<TaskStatus, string>> = {
+    signed: 'success',
+    rejected: 'danger',
+    canceled: 'neutral',
+    in_transit: 'active',
+    arrived: 'arrived',
+  }
   return tones[props.status] || 'waiting'
 })
 </script>
 
-<template><text class="tag" :class="tone">{{ taskStatusText[status] }}</text></template>
+<template>
+  <text class="tag" :class="tone">{{ taskStatusText[status] }}</text>
+</template>
 
 <style scoped>
-.tag { display:inline-block; padding: 6rpx 16rpx; border-radius: 999rpx; font-size: 24rpx; background:#fff1cc; color:#875b00; }
-.active { background:#dff4ef; color:#087f6d; }.ok { background:#e3f5e8;color:#18733b}.bad {background:#fee4e2;color:#b42318}.muted {background:#edf0f0;color:#667573}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8rpx 20rpx;
+  border-radius: 999rpx;
+  color: #9a6a08;
+  background: #fff5d9;
+  font-size: 23rpx;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.active { color: #594bf2; background: #eeecff; }
+.success { color: #29996b; background: #e7f7ef; }
+.arrived { color: #247ca7; background: #e7f5fb; }
+.danger { color: #cb3e49; background: #ffeaec; }
+.neutral { color: #7d8b9c; background: #edf1f5; }
 </style>

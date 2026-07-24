@@ -24,6 +24,7 @@ htmlcov/
 logs/
 tmp/
 temp/
+backend/uploads/
 *.tmp
 *.swp
 

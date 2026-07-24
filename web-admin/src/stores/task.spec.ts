@@ -108,6 +108,18 @@ describe('task monitoring store', () => {
     expect(store.monitoringError).toBeNull()
   })
 
+  it('loads a trace report when the report URL is opened directly', async () => {
+    const store = useTaskStore()
+    const directTrace = makeTrace(makeTask('in_transit'))
+    gatewayMock.getTraceReport.mockResolvedValue(directTrace)
+
+    await store.loadTrace('TASK-001')
+
+    expect(store.activeTaskId).toBe('TASK-001')
+    expect(store.trace).toEqual(directTrace)
+    expect(store.traceLoading).toBe(false)
+  })
+
   it('keeps the last successful data after a connection failure and clears the notice on recovery', async () => {
     const store = useTaskStore()
     const originalTask = makeTask('in_transit')
